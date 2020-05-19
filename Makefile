@@ -42,6 +42,7 @@ run_client:
 	@mount /dev/nbd0 storage
 
 stop_backup:
+	@nbd-client -d /dev/nbd0
 	@umount /dev/nbd0
 
 .PHONY: install clean add-manpages compile run_server run_client run_mount stop_backup
