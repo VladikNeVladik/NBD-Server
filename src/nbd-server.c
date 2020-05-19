@@ -164,7 +164,7 @@ int establish_connection()
 
 void open_export_file(struct ServerHandle* handle)
 {
-	handle->export_fd = open(handle->export_name, O_RDONLY|O_NONBLOCK|O_LARGEFILE);
+	handle->export_fd = open(handle->export_name, O_RDONLY|O_DIRECT|O_NONBLOCK|O_LARGEFILE);
 	if (handle->export_fd == -1)
 	{
 		LOG_ERROR("[open_export_file] Unable to open() export file");
@@ -307,6 +307,13 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 	struct NBD_Request req;
 	int sock_fd = handle->client_sock_fd;
 
+	char* export = mmap(NULL, handle->export_size, PROT_READ|PROT_WRITE, MAP_PRIVATE|MAP_POPULATE, handle->export_fd, 0);
+	if (export == MAP_FAILED)
+	{
+		LOG_ERROR("[simple_transmission_eventloop] Unable to mmap() export");
+		exit(EXIT_FAILURE);
+	}
+
 	while (1)
 	{
 		recv_nbd_request(sock_fd, &req);
@@ -320,29 +327,10 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 		else if (req.type == NBD_CMD_READ)
 		{
 			// Send reply:
-			uint8_t buffer[READ_BLOCK_SIZE];
-			loff_t   off = req.offset;
-			uint32_t len = req.length;
-
-			while (1)
+			if (send(sock_fd, export + req.offset, req.length, MSG_NOSIGNAL) != req.length)
 			{
-				uint32_t bytes_to_send = (len < READ_BLOCK_SIZE) ? len : READ_BLOCK_SIZE;
-				if (pread(handle->export_fd, buffer, bytes_to_send, off) != bytes_to_send)
-				{
-					LOG_ERROR("[simple_transmission_eventloop] Unable to read() data from export");
-					exit(EXIT_FAILURE);
-				}
-
-				if (send(sock_fd, buffer, bytes_to_send, MSG_NOSIGNAL) != bytes_to_send)
-				{
-					LOG_ERROR("[simple_transmission_eventloop] Unable to send() data to peer");
-					exit(EXIT_FAILURE);
-				}
-
-				if (len <= READ_BLOCK_SIZE) break;
-
-				off += READ_BLOCK_SIZE;
-				len -= READ_BLOCK_SIZE;
+				LOG_ERROR("[simple_transmission_eventloop] Unable to send() data to peer");
+				exit(EXIT_FAILURE);
 			}
 
 			LOG("Reply to request sent");
@@ -357,6 +345,12 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 		{
 			BUG_ON(1, "[simple_transmission_eventloop] Forbidden request type");
 		}
+	}
+
+	if (munmap(export, handle->export_size) == -1)
+	{
+		LOG_ERROR("[simple_transmission_eventloop] Unable to unmap() export");
+		exit(EXIT_FAILURE);
 	}
 }
 

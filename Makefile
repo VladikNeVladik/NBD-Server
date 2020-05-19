@@ -26,7 +26,7 @@ compile : bin/nbd-server
 run_backup_server : compile
 	@printf "\033[1;33mRunning server!\033[0m\n"
 	@rm -rf serverside-fs
-	@dd if=/dev/zero of=serverside-fs bs=1024 count=1000
+	@dd if=/dev/zero of=serverside-fs bs=1024 count=36000
 	@mkfs.ext4 serverside-fs -d data-to-backup
 	@bin/nbd-server serverside-fs
 	@rm -rf serverside-fs
