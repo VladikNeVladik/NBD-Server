@@ -1,3 +1,5 @@
 *.txt
 bin
 .tags
+data-to-backup storage
+serverside-fs
