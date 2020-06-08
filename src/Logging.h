@@ -29,16 +29,25 @@
 // Close:
 #include <unistd.h>
 
+//----------------------
+// Log Levels 
+//----------------------
+// 0 - Logging Disabled
+// 1 - Logging Enabled
+//----------------------
+
+#define LOG_LEVEL 1
+
 //------------------------
 // Log File Manipulations 
 //------------------------
 
 const char* LOG_FILE = "LOG.txt";
 
-__attribute__((unused)) static int acquire_log_fd(const char* input_format)
+__attribute__((unused)) static FILE* acquire_log_file(const char* input_format)
 {
 #ifndef LOG_TO_STDOUT
-	static int log_fd = -1;
+	FILE* log_file = NULL;
 
 	// Get current time:
 	struct timeval cur_time;
@@ -64,28 +73,28 @@ __attribute__((unused)) static int acquire_log_fd(const char* input_format)
        exit(EXIT_FAILURE);
    	}
 
-	if (log_fd == -1)
+	if (log_file == NULL)
 	{
-		log_fd = open(LOG_FILE, O_WRONLY|O_CREAT, 0600);
-		if (log_fd == -1)
+		log_file = fopen(LOG_FILE, "r");
+		if (log_file == NULL)
 		{
 			fprintf(stderr, "[ERROR %s:%06ld] Unable to open log file %s\n", time_str_buf, cur_time.tv_usec, LOG_FILE);
 			exit(EXIT_FAILURE);
 		}
 
-		dprintf(log_fd, "[LOG %s:%06ld] Opened log file %s\n", time_str_buf, cur_time.tv_usec, LOG_FILE);
+		fprinf(log_file, "[LOG %s:%06ld] Opened log file %s\n", time_str_buf, cur_time.tv_usec, LOG_FILE);
 	}
 	
-	if (strcmp(input_format, "Closed log file") == 0 && log_fd != -1)
+	if (strcmp(input_format, "Closed log file") == 0 && log_file != NULL)
 	{
-		dprintf(log_fd, "[LOG %s:%06ld] Closed log file %s\n", time_str_buf, cur_time.tv_usec, LOG_FILE);
-		close(log_fd);
-		log_fd = -1;
+		fprinf(log_file, "[LOG %s:%06ld] Closed log file %s\n", time_str_buf, cur_time.tv_usec, LOG_FILE);
+		fclose(log_file);
+		log_file = NULL;
 	}
 
-	return log_fd;
+	return log_file;
 #else
-	return 1;
+	return stdout;
 #endif
 }
 
@@ -97,102 +106,98 @@ __attribute__((unused)) static void nop() {}
 // Logging Macros 
 //----------------
 
-#define LOG(format, ...)																			\
-{																									\
-	int log_fd = acquire_log_fd(format);															\
-																									\
-	struct timeval cur_time;																		\
-																									\
-	if (gettimeofday(&cur_time, NULL) == -1)														\
-	{																								\
-		fprintf(stderr, "[ERROR] Unable to get time of day\n");										\
-		exit(EXIT_FAILURE);																			\
-	}																								\
-																									\
-	struct tm* broken_down_time = localtime(&cur_time.tv_sec);										\
-	if (broken_down_time == NULL)																	\
-	{																								\
-		fprintf(stderr, "[ERROR] Unable to get broken-down time\n");								\
-		exit(EXIT_FAILURE);																			\
-	}																								\
-																									\
-	char time_str_buf[128];																			\
-	if (strftime(time_str_buf, sizeof(time_str_buf), "%Y-%m-%d %H:%M:%S", broken_down_time) == 0)	\
-	{																								\
-       fprintf(stderr, "[ERROR] Unable to get a nice readable time string\n");						\
-       exit(EXIT_FAILURE);																			\
-   	}																								\
-																									\
-	dprintf(log_fd, "[LOG %s:%06ld] ", time_str_buf, cur_time.tv_usec);								\
-	dprintf(log_fd, format, ##__VA_ARGS__);															\
-	dprintf(log_fd, "\n");																			\
+#if LOG_LEVEL == 0
+#define LOG(format, ...)
+
+#elif LOG_LEVEL == 1 
+#define LOG(format, ...)																					\
+{																											\
+	FILE* __log_file = acquire_log_file(format);															\
+																											\
+	struct timeval __cur_time;																				\
+																											\
+	if (gettimeofday(&__cur_time, NULL) == -1)																\
+	{																										\
+		fprintf(stderr, "[ERROR] Unable to get time of day\n");												\
+		exit(EXIT_FAILURE);																					\
+	}																										\
+																											\
+	struct tm* __broken_down_time = localtime(&__cur_time.tv_sec);											\
+	if (__broken_down_time == NULL)																			\
+	{																										\
+		fprintf(stderr, "[ERROR] Unable to get broken-down time\n");										\
+		exit(EXIT_FAILURE);																					\
+	}																										\
+																											\
+	char __time_str_buf[128];																				\
+	if (strftime(__time_str_buf, sizeof(__time_str_buf), "%Y-%m-%d %H:%M:%S", __broken_down_time) == 0)		\
+	{																										\
+       fprintf(stderr, "[ERROR] Unable to get a nice readable time string\n");								\
+       exit(EXIT_FAILURE);																					\
+   	}																										\
+																											\
+	fprintf(__log_file, "[LOG %s:%06ld] "format"\n", __time_str_buf, __cur_time.tv_usec, ##__VA_ARGS__);\
 } nop()
 
-#define LOG_ERROR(format, ...)																		\
-{																									\
-	acquire_log_fd(format);																			\
-																									\
-	struct timeval cur_time;																		\
-																									\
-	if (gettimeofday(&cur_time, NULL) == -1)														\
-	{																								\
-		fprintf(stderr, "[ERROR] Unable to get time of day\n");										\
-		exit(EXIT_FAILURE);																			\
-	}																								\
-																									\
-	struct tm* broken_down_time = localtime(&cur_time.tv_sec);										\
-	if (broken_down_time == NULL)																	\
-	{																								\
-		fprintf(stderr, "[ERROR] Unable to get broken-down time\n");								\
-		exit(EXIT_FAILURE);																			\
-	}																								\
-																									\
-	char time_str_buf[128];																			\
-	if (strftime(time_str_buf, sizeof(time_str_buf), "%Y-%m-%d %H:%M:%S", broken_down_time) == 0)	\
-	{																								\
-       fprintf(stderr, "[ERROR] Unable to get a nice readable time string\n");						\
-       exit(EXIT_FAILURE);																			\
-   	}																								\
-																									\
-	fprintf(stderr, "[ERROR %s:%06ld]", time_str_buf, cur_time.tv_usec);							\
-	fprintf(stderr, format, ##__VA_ARGS__);															\
-	fprintf(stderr, "\n");																			\
+#endif
+
+#define LOG_ERROR(format, ...)																					\
+{																												\
+	struct timeval __cur_time;																					\
+																												\
+	if (gettimeofday(&__cur_time, NULL) == -1)																	\
+	{																											\
+		fprintf(stderr, "[ERROR] Unable to get time of day\n");													\
+		exit(EXIT_FAILURE);																						\
+	}																											\
+																												\
+	struct tm* __broken_down_time = localtime(&__cur_time.tv_sec);												\
+	if (__broken_down_time == NULL)																				\
+	{																											\
+		fprintf(stderr, "[ERROR] Unable to get broken-down time\n");											\
+		exit(EXIT_FAILURE);																						\
+	}																											\
+																												\
+	char __time_str_buf[128];																					\
+	if (strftime(__time_str_buf, sizeof(__time_str_buf), "%Y-%m-%d %H:%M:%S", __broken_down_time) == 0)			\
+	{																											\
+       fprintf(stderr, "[ERROR] Unable to get a nice readable time string\n");									\
+       exit(EXIT_FAILURE);																						\
+   	}																											\
+																												\
+	fprintf(stderr, "[ERROR %s:%06ld] "format"\n", __time_str_buf, __cur_time.tv_usec, ##__VA_ARGS__);			\
 } nop()
 
-#define BUG_ON(condition, format, ...)																	\
-{																										\
-	if (condition)																						\
-	{																									\
-		acquire_log_fd(format);																			\
-																										\
-		struct timeval cur_time;																		\
-																										\
-		if (gettimeofday(&cur_time, NULL) == -1)														\
-		{																								\
-			fprintf(stderr, "[ERROR] Unable to get time of day\n");										\
-			exit(EXIT_FAILURE);																			\
-		}																								\
-																										\
-		struct tm* broken_down_time = localtime(&cur_time.tv_sec);										\
-		if (broken_down_time == NULL)																	\
-		{																								\
-			fprintf(stderr, "[ERROR] Unable to get broken-down time\n");								\
-			exit(EXIT_FAILURE);																			\
-		}																								\
-																										\
-		char time_str_buf[128];																			\
-		if (strftime(time_str_buf, sizeof(time_str_buf), "%Y-%m-%d %H:%M:%S", broken_down_time) == 0)	\
-		{																								\
-	       fprintf(stderr, "[ERROR] Unable to get a nice readable time string\n");						\
-	       exit(EXIT_FAILURE);																			\
-	   	}																								\
-																										\
-		fprintf(stderr, "[BUG %s:%06ld]", time_str_buf, cur_time.tv_usec);								\
-		fprintf(stderr, format, ##__VA_ARGS__);															\
-		fprintf(stderr, "\n");																			\
-																										\
-		exit(EXIT_FAILURE);																				\
-	}																									\
+#define BUG_ON(condition, format, ...)																			\
+{																												\
+	if (condition)																								\
+	{																											\
+		struct timeval __cur_time;																				\
+																												\
+		if (gettimeofday(&__cur_time, NULL) == -1)																\
+		{																										\
+			fprintf(stderr, "[ERROR] Unable to get time of day\n");												\
+			exit(EXIT_FAILURE);																					\
+		}																										\
+																												\
+		struct tm* __broken_down_time = localtime(&__cur_time.tv_sec);											\
+		if (__broken_down_time == NULL)																			\
+		{																										\
+			fprintf(stderr, "[ERROR] Unable to get broken-down time\n");										\
+			exit(EXIT_FAILURE);																					\
+		}																										\
+																												\
+		char __time_str_buf[128];																				\
+		if (strftime(__time_str_buf, sizeof(__time_str_buf), "%Y-%m-%d %H:%M:%S", __broken_down_time) == 0)		\
+		{																										\
+	       fprintf(stderr, "[ERROR] Unable to get a nice readable time string\n");								\
+	       exit(EXIT_FAILURE);																					\
+	   	}																										\
+																												\
+		fprintf(stderr, "[BUG %s:%06ld] "format"\n", __time_str_buf, __cur_time.tv_usec, ##__VA_ARGS__);		\
+																												\
+		exit(EXIT_FAILURE);																						\
+	}																											\
 } nop()
 
 //-----------------------------
@@ -210,7 +215,7 @@ int set_log_file(const char* log_file)
 
 	LOG_FILE = log_file;
 
-	LOG(" Changed log file to %s", log_file);
+	LOG("Changed log file to %s", log_file);
 
 	return 0;
 }

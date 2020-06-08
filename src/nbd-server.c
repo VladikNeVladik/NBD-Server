@@ -17,15 +17,10 @@
 // NBD flags and constants:
 #include "NBD.h"
 
-// Request Tables:
-#include "RequestManagement.h"
+// Request tables:
+#include "NBD_Request.h"
 
 #include <stdlib.h>
-// Sockets API:
-#include <sys/types.h>
-#include <sys/socket.h>
-// splice() and fcntl():
-#include <fcntl.h>
 // open():
 #include <sys/stat.h>
 // close(), read():
@@ -40,6 +35,8 @@
 #include <errno.h>
 // nanosleep():
 #include <time.h>
+// epoll:
+#include <sys/epoll.h>
 
 //=================
 // Data Structures
@@ -65,6 +62,8 @@ struct ServerHandle
 	bool structured_replies;
 
 	// Transmission phase:
+	int epoll_fd;
+
 	struct IO_RequestTable io_table;
 
 	struct NBD_RequestTable nbd_table;
@@ -74,92 +73,13 @@ struct ServerHandle
 };
 
 //==========================
-// Connection establishment
+// Connection establishment 
 //==========================
 
-const uint16_t NBD_IANA_RESERVED_PORT = 10809;
-
-int establish_connection()
-{
-	int accept_sock_fd = socket(AF_INET, SOCK_STREAM, 0);
-	if (accept_sock_fd == -1)
-	{
-		LOG_ERROR("[init_connection] Unable to get socket()");
-		exit(EXIT_FAILURE);
-	}
-
-	// Acquire address:
-	struct sockaddr_in server_addr;
-	server_addr.sin_family      = AF_INET;
-	server_addr.sin_addr.s_addr = htonl(INADDR_ANY);
-	server_addr.sin_port        = htons(NBD_IANA_RESERVED_PORT);
-
-	bool logged_sock_addr_in_use = 0;
-	while (bind(accept_sock_fd, &server_addr, sizeof(server_addr)) == -1)
-	{
-		if (errno != EADDRINUSE)
-		{
-			LOG_ERROR("[init_connection] Unable to bind()");
-			exit(EXIT_FAILURE);
-		}
-
-		if (!logged_sock_addr_in_use)
-		{
-			LOG("Sock Address In Use. Waiting For It To Get Free");
-			logged_sock_addr_in_use = 1;
-		}
-
-		// Sleep for socket to become active:
-		struct timespec sleep_request = {0, 100000000}; // 100ms
-		nanosleep(&sleep_request, NULL);
-	}
-	
-
-	// Ask socket to automatically detect disconnection:
-	int setsockopt_yes = 1;
-	if (setsockopt(accept_sock_fd, SOL_SOCKET, SO_KEEPALIVE, &setsockopt_yes, sizeof(setsockopt_yes)) == -1)
-	{
-		LOG_ERROR("[init_connection] Unable to set SO_KEEPALIVE socket option");
-		exit(EXIT_FAILURE);
-	}
-
-	// Disable the TIME-WAIT state of a socket:
-	if (setsockopt(accept_sock_fd, SOL_SOCKET, SO_REUSEADDR, &setsockopt_yes, sizeof(setsockopt_yes)) == -1)
-	{
-		LOG_ERROR("[init_connection] Unable to set SO_REUSEADDR socket option");
-		exit(EXIT_FAILURE);
-	}
-
-	// Listen for incoming connection (only 1 connection is supported):
-	if (listen(accept_sock_fd, 1) == -1)
-	{
-		LOG_ERROR("[init_connection] Unable to listen() on a socket");
-		exit(EXIT_FAILURE);
-	}
-
-	// Wait for client:
-	LOG("Waiting for client");
-
-	int sock_fd = accept(accept_sock_fd, NULL, NULL);
-	if (sock_fd == -1)
-	{
-		LOG_ERROR("[init_connection] Unable to accept() a connection");
-		exit(EXIT_FAILURE);
-	}
-
-	if (close(accept_sock_fd) == -1)
-	{
-		LOG_ERROR("[init_connection] Unable to close() accept-socket");
-		exit(EXIT_FAILURE);
-	}
-
-	LOG("Connection established");
-
-	return sock_fd;
-}
+#include "Connection.h"
 
 //===================
-// Export Management
+// Export Management 
 //===================
 
 void open_export_file(struct ServerHandle* handle)
@@ -221,7 +141,7 @@ void manage_options(struct ServerHandle* handle)
 			}
 			case NBD_OPT_ABORT:
 			{
-				// Ignore the export name:
+				// Ignore the option data:
 				recv_option_data(sock_fd, &opt);
 
 				send_option_reply(sock_fd, &rep);
@@ -240,7 +160,7 @@ void manage_options(struct ServerHandle* handle)
 			case NBD_OPT_INFO:
 			{
 				manage_option_go(sock_fd, &opt, handle->export_size);
-				// Do not return
+				// Do not enter transmission phase on NBD_OPT_INFO
 			}
 			case NBD_OPT_GO:
 			{
@@ -251,8 +171,8 @@ void manage_options(struct ServerHandle* handle)
 			{
 				recv_option_data(sock_fd, &opt);
 
-				rep.option_reply           = opt.length ? NBD_REP_ERR_INVALID : NBD_REP_ACK;
-				handle->structured_replies = (opt.length != 0);
+				rep.option_reply           = (opt.length == 0) ? NBD_REP_ACK : NBD_REP_ERR_INVALID;
+				handle->structured_replies = (opt.length == 0);
 
 				send_option_reply(sock_fd, &rep);
 
@@ -275,7 +195,7 @@ void manage_options(struct ServerHandle* handle)
 
 #include "Transmission.h"
 
-struct OnWire_NBD_Reply_Simple
+struct OnWire_Simple_NBD_Reply
 {
 	uint32_t magic;
 	uint32_t error;
@@ -284,7 +204,7 @@ struct OnWire_NBD_Reply_Simple
 
 void send_nbd_simple_reply_header(int sock_fd, struct NBD_Request* req, bool more)
 {
-	struct OnWire_NBD_Reply_Simple onwire_reply =
+	struct OnWire_Simple_NBD_Reply onwire_reply =
 	{
 		.magic  = htobe32(NBD_MAGIC_SIMPLE_REPLY),
 		.error  = htobe32(req->error),
@@ -363,14 +283,16 @@ void init_structured_transmission(struct ServerHandle* handle)
 	handle->shutdown = 0;
 	handle->nbd_reqs_pending = 0;
 
-	init_req_tables(&handle->io_table, &handle->nbd_table);
+	init_io_table (&handle-> io_table);
+	init_nbd_table(&handle->nbd_table);
 
 	LOG("Structured transmission initialised");
 }
 
 void finish_structured_transmission(struct ServerHandle* handle)
 {
-	free_req_tables(&handle->io_table, &handle->nbd_table);
+	free_io_table (&handle-> io_table);
+	free_nbd_table(&handle->nbd_table);
 
 	LOG("Structured transmission finished");
 }
@@ -390,13 +312,13 @@ void* structured_transmission_recv_eventloop(void* arg)
 
 		recv_nbd_request(handle->client_sock_fd, nbd_req);
 
+		submit_nbd_request(&handle->io_table, &handle->nbd_table, nbd_cell);
+		
 		if (nbd_req->type == NBD_CMD_DISC)
 		{
 			handle->shutdown = 1;
 			break;
 		}
-
-		submit_nbd_request(&handle->io_table, &handle->nbd_table, nbd_cell);
 	}
 
 	return NULL;
@@ -408,22 +330,30 @@ void structured_transmission_send_eventloop(struct ServerHandle* handle)
 
 	while (1)
 	{
-		// Wait for IO-ring event:
-		uint32_t io_cell = complete_io_request(&handle->io_table);
+		// Block waiting for a completed IO request:
+		uint32_t io_cell = get_io_request(&handle->io_table.io_ring, handle->io_table.io_reqs);
+
 		uint32_t nbd_cell = handle->io_table.io_reqs[io_cell].mother_cell;
 
 		struct  IO_Request*  io_req = &handle-> io_table. io_reqs[ io_cell];
 		struct NBD_Request* nbd_req = &handle->nbd_table.nbd_reqs[nbd_cell];
 
-		if (nbd_req->type == NBD_CMD_READ)
+		if (nbd_req->type == NBD_CMD_DISC)
+		{
+			// Do nothing
+		}
+		else if (nbd_req->type == NBD_CMD_READ)
 		{
 			send_nbd_read_reply(handle->client_sock_fd, nbd_req, io_req);
 		}
 
+		free_io_req_cell(&handle->io_table, io_cell);
+		nbd_req->io_reqs_pending -= 1;
+
 		if (nbd_req->io_reqs_pending == 0)
 		{
 			send_nbd_final_read_reply(handle->client_sock_fd, nbd_req);
-
+			
 			free_nbd_req_cell(&handle->nbd_table, nbd_cell);
 			handle->nbd_reqs_pending -= 1;
 		}

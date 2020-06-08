@@ -8,7 +8,7 @@
 #ifndef NBD_SERVER_TRANSMISSION_H_INCLUDED
 #define NBD_SERVER_TRANSMISSION_H_INCLUDED
 
-#include "RequestManagement.h"
+#include "NBD_Request.h"
 
 // recv(), send():
 #include <sys/types.h>
@@ -59,27 +59,27 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 	// Error-check:
 	if (be32toh(onwire_req.request_magic) != NBD_MAGIC_REQUEST)
 	{
-		LOG("[NBD-SERVER] Incorrect request magic");
-		LOG("[NBD-SERVER] Hard disconnect");
+		LOG("Incorrect request magic");
+		LOG("Hard disconnect");
 		exit(EXIT_SUCCESS);
 	}
 
 	if (be16toh(onwire_req.command_flags) != 0)
 	{
-		LOG("[NBD-SERVER] Client sent unsoppurted command flags");
+		LOG("Client sent unsoppurted command flags");
 		nbd_req->error = NBD_EINVAL;
 	}
 
 	if (nbd_req->type != NBD_CMD_READ && nbd_req->type != NBD_CMD_DISC)
 	{
-		LOG("[NBD-SERVER] Client sent unsoppurted request type");
+		LOG("Client sent unsoppurted request type");
 		nbd_req->error = NBD_EINVAL;
 	}
 
 	// Discard spare data:
 	if (nbd_req->type != NBD_CMD_READ && nbd_req->length != 0)
 	{
-		LOG("[NBD-SERVER] Client sent non-zero request data length");
+		LOG("Client sent non-zero request data length");
 		nbd_req->error = NBD_EINVAL;
 
 		const char* TRASH_BIN = "/dev/null";
@@ -94,7 +94,7 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 		close(trash_bin);
 	}
 
-	LOG("[NBD-SERVER] Recieved NBD Request: {type=%x, hdl=%lu, off=%lu, len=%u}",
+	LOG("Recieved NBD request: {type=%x, hdl=%lu, off=%lu, len=%u}",
 		nbd_req->type,
 		nbd_req->handle,
 		nbd_req->offset,
@@ -103,17 +103,17 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 
 void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Request* io_req)
 {
-	struct OnWire_NBD_Reply onwire_reply =
-	{
-		.reply_magic = htobe32(NBD_MAGIC_STRUCTURED_REPLY),
-		.flags       = htobe16(0),
-		.type        = htobe16(io_req->error ? NBD_REPLY_TYPE_ERROR_OFFSET : NBD_REPLY_TYPE_OFFSET_DATA),
-		.handle      = htobe64(nbd_req->handle),
-		.length      = htobe32(io_req->length)
-	};
-
 	if (io_req->error == 0)
 	{
+		struct OnWire_NBD_Reply onwire_reply =
+		{
+			.reply_magic = htobe32(NBD_MAGIC_STRUCTURED_REPLY),
+			.flags       = htobe16(0),
+			.type        = htobe16(NBD_REPLY_TYPE_OFFSET_DATA),
+			.handle      = htobe64(nbd_req->handle),
+			.length      = htobe32(8 + io_req->length /*offset + data*/)
+		};
+
 		if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE|MSG_NOSIGNAL) != sizeof(onwire_reply))
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() reply header");
@@ -135,6 +135,15 @@ void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Req
 	}
 	else
 	{
+		struct OnWire_NBD_Reply onwire_reply =
+		{
+			.reply_magic = htobe32(NBD_MAGIC_STRUCTURED_REPLY),
+			.flags       = htobe16(0),
+			.type        = htobe16(NBD_REPLY_TYPE_ERROR_OFFSET),
+			.handle      = htobe64(nbd_req->handle),
+			.length      = htobe32(4 + 2 + 8 /*error + strlen + offset*/)
+		};
+
 		if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE|MSG_NOSIGNAL) != sizeof(onwire_reply))
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() reply header");
@@ -148,10 +157,10 @@ void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Req
 			exit(EXIT_FAILURE);
 		}
 
-		uint32_t length = htobe32(0);
-		if (send(sock_fd, &length, 4, MSG_MORE|MSG_NOSIGNAL) != 4)
+		uint16_t length = htobe16(0);
+		if (send(sock_fd, &length, 2, MSG_MORE|MSG_NOSIGNAL) != 4)
 		{
-			LOG_ERROR("[send_nbd_read_reply] Unable to send() length");
+			LOG_ERROR("[send_nbd_read_reply] Unable to send() human-readable string length");
 			exit(EXIT_FAILURE);
 		}
 
@@ -163,7 +172,7 @@ void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Req
 		}
 	}
 	
-	LOG("[NBD-SERVER] Send NBD_CMD_READ Structured Reply: {hdl=%lu, off=%lu, len=%u}",
+	LOG("Sent NBD_CMD_READ structured reply: {hdl=%lu, off=%lu, len=%u}",
 		nbd_req->handle,
 		 io_req->offset,
 		 io_req->length);
@@ -186,7 +195,7 @@ void send_nbd_final_read_reply(int sock_fd, struct NBD_Request* nbd_req)
 		exit(EXIT_FAILURE);
 	}
 
-	LOG("[NBD-SERVER] Send NBD_CMD_READ Final Reply: {hdl=%lu, off=%lu, len=%u}",
+	LOG("Sent NBD_CMD_READ final replyto NBd-request {hdl=%lu, off=%lu, len=%u}",
 		nbd_req->handle,
 		nbd_req->offset,
 		nbd_req->length);

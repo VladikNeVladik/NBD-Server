@@ -16,7 +16,7 @@ add-manpages : liburing-manpages/*
 	@cp liburing-manpages/* /usr/share/man/man2
 	@printf "\033[1;33mAdded io_uring_setup, io_uring_enter, io_uring_register manpages to /usr/share/man/man2\033[0m\n"
 
-HEADERS = src/NBD.h src/Logging.h src/Negotiation.h src/OptionHaggling.h src/IO_Ring.h src/RequestManagement.h src/Transmission.h
+HEADERS = src/NBD.h src/Logging.h src/Connection.h src/Negotiation.h src/OptionHaggling.h src/IO_Ring.h src/IO_Request.h src/NBD_Request.h src/Transmission.h
 
 bin/nbd-server : src/nbd-server.c ${HEADERS}
 	${CC} ${CCFLAGS} $< -o $@
@@ -32,9 +32,16 @@ run_backup_server : compile
 	@rm -rf serverside-fs
 
 linux_client:
-	@printf "\033[1;33mDon't forget to \'modprobe nbd\'\033[0m\n"
 	@printf "\033[1;33mRunning linux-client!\033[0m\n"
+	@sudo modprobe nbd
 	@sudo nbd-client localhost /dev/nbd0
+	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
+	@sudo mount /dev/nbd0 storage
+
+qemu_client:
+	@printf "\033[1;33mRunning qemu-client!\033[0m\n"
+	@sudo modprobe nbd
+	@sudo qemu-nbd --read-only --fork --connect=/dev/nbd0 nbd:localhost:10809
 	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
 	@sudo mount /dev/nbd0 storage
 
