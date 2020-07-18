@@ -23,7 +23,6 @@ struct NBD_Request
 
 	uint32_t error;
 
-	int fd;
 	uint16_t type;
 	uint64_t handle;
 	uint64_t offset;
@@ -156,7 +155,6 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 		struct IO_Request* io_req = &io_table->io_reqs[io_cell];
 
 		io_req->mother_cell = nbd_cell;
-		io_req->fd          = 0;
 		io_req->opcode      = IORING_OP_NOP;
 		io_req->offset      = -1;
 		io_req->length      = nbd_req->length;
@@ -183,7 +181,6 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 			struct IO_Request* io_req = &io_table->io_reqs[io_cell];
 
 			io_req->mother_cell = nbd_cell;
-			io_req->fd          = nbd_req->fd;
 			io_req->opcode      = IORING_OP_READ_FIXED;
 			io_req->offset      = off;
 			io_req->length      = (len <= READ_BLOCK_SIZE)? len : READ_BLOCK_SIZE;

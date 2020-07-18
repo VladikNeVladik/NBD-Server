@@ -27,7 +27,7 @@ add-manpages : liburing-manpages/*
 HEADERS = src/NBD.h src/Logging.h src/Connection.h src/Negotiation.h src/OptionHaggling.h src/IO_Ring.h src/IO_Request.h src/NBD_Request.h src/Transmission.h
 
 bin/nbd-server : src/nbd-server.c ${HEADERS}
-	${CC} -v ${CCFLAGS} $< -o $@
+	${CC} ${CCFLAGS} $< -o $@
 
 bin/kill-after : test/kill-after.c
 	${CC} ${CCFLAGS} $< -o $@

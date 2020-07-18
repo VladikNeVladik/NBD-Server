@@ -51,7 +51,6 @@ struct IO_Request
 
 	uint32_t mother_cell;
 
-	int fd;
 	uint8_t  opcode;
 	uint64_t offset;
 	uint32_t length;
@@ -160,7 +159,18 @@ void init_io_ring(struct IO_Ring* io_ring, uint32_t num_entries)
 	io_ring->cq.overflow     = cq_ring_ptr + params.cq_off.overflow;
 	io_ring->cq.cq_ring      = cq_ring_ptr + params.cq_off.cqes;
 
-	LOG("IO-userspace-ring initialised");
+	LOG("IO-ring initialised");
+}
+
+void register_files(struct IO_Ring* io_ring, int* fds, uint32_t num_fds)
+{
+	if (syscall(NR_io_uring_register, io_ring->fd, IORING_REGISTER_FILES, fds, num_fds) == -1)
+	{
+		LOG_ERROR("[register_io_buffers] Unable to register IO files");
+		exit(EXIT_FAILURE);
+	}
+
+	LOG("Registered files for IO-ring");
 }
 
 void register_io_buffers(struct IO_Ring* io_ring, struct iovec* buffers, uint32_t num_buffers)
@@ -171,23 +181,23 @@ void register_io_buffers(struct IO_Ring* io_ring, struct iovec* buffers, uint32_
 		exit(EXIT_FAILURE);
 	}
 
-	LOG("Some IO-buffers registered");
+	LOG("Registered IO buffers for IO-ring");
 }
 
 void free_io_ring(struct IO_Ring* io_ring)
 {
 	if (close(io_ring->fd) == -1)
 	{
-		LOG_ERROR("[free_io_ring] Unable to close IORing");
+		LOG_ERROR("[free_io_ring] Unable to close IO-ring");
 		exit(EXIT_FAILURE);
 	}
 
 	LOG("IO-userspace-ring freed");
 }
 
-//==========================
-// Compiler Memory Barriers
-//==========================
+//================================
+// Compiler Reordering Prevention
+//================================
 
 #define WRITE_ONCE(var, val) (*((volatile __typeof(var) *)(&(var))) = (val))
 #define READ_ONCE(var)       (*((volatile __typeof(var) *)(&(var))))
@@ -198,8 +208,7 @@ void free_io_ring(struct IO_Ring* io_ring)
 
 #if defined(__x86_64) || defined(__i386__)
 #define memory_barrier() __asm__ __volatile__("":::"memory")
-
-#else // In case of unknown arch perform a total memory barrier
+#else
 #define memory_barrier() __sync_synchronize()
 #endif
 
@@ -214,17 +223,17 @@ void submit_io_request(struct IO_Ring* io_ring, struct IO_Request* io_req, uint3
 	unsigned tail = READ_ONCE(*io_ring->sq.tail);
 
 	// Configure the SQ-entry for submission:
-	// Note: WRITE_ONCE forbids the compiler to optimize stores to be after the release:
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].opcode    ,           io_req->opcode);
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].flags     ,           0             );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].ioprio    ,           0 /*default*/ );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].fd        ,           io_req->fd    );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].off       ,           io_req->offset);
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].addr      , (int64_t) io_req->buffer);
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].len       ,           io_req->length);
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].rw_flags  ,           0             );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].user_data ,           io_req_cell   );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].buf_index ,           io_req_cell   );
+	// Note: WRITE_ONCE forbids the compiler to optimize stores away from barriered section
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].opcode    ,           io_req->opcode   );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].flags     ,           IOSQE_FIXED_FILE );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].ioprio    ,           0 /*default*/    );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].fd        ,           0 /*registered*/ );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].off       ,           io_req->offset   );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].addr      , (int64_t) io_req->buffer   );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].len       ,           io_req->length   );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].rw_flags  ,           0                );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].user_data ,           io_req_cell      );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].buf_index ,           io_req_cell      );
 
 	WRITE_ONCE(io_ring->sq.sq_ring[tail & *io_ring->sq.ring_mask], io_req_cell);
 
@@ -281,7 +290,7 @@ uint32_t wait_for_io_completion(struct IO_Ring* io_ring)
 	// Ensure the head moves after the io_req_cell is read
 	memory_barrier();
 	WRITE_ONCE(*io_ring->cq.head, head + 1);
-	
+
 	return io_req_cell;
 }
 

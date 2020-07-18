@@ -130,6 +130,9 @@ void open_export_file(struct ServerHandle* handle)
 
 void manage_options(struct ServerHandle* handle)
 {
+	// Initialise server handle:
+	handle->structured_replies = 0;
+
 	struct NBD_Option opt;
 	struct NBD_Option_Reply rep;
 	int sock_fd = handle->client_sock_fd;
@@ -264,11 +267,6 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 			// Send reply:
 			if (send(sock_fd, export + req.offset, req.length, 0) != req.length)
 			{
-				// if (errno == EPIPE || errno == ECONNRESET)
-				// {
-				// 	conn_hangup_handler();
-				// }
-
 				LOG_ERROR("[simple_transmission_eventloop] Unable to send() data to peer");
 				exit(EXIT_FAILURE);
 			}
@@ -302,7 +300,7 @@ void init_structured_transmission(struct ServerHandle* handle)
 {
 	handle->shutdown = 0;
 
-	init_io_table (&handle-> io_table);
+	init_io_table (&handle-> io_table, handle->export_fd);
 	init_nbd_table(&handle->nbd_table);
 
 	LOG("Structured transmission initialised");

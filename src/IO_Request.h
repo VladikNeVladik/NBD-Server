@@ -18,7 +18,7 @@
 
 typedef char bool;
 
-const size_t   MAX_IO_REQUESTS =  256;
+const size_t   MAX_IO_REQUESTS =   32;
 const uint32_t READ_BLOCK_SIZE = 4096;
 
 //=================
@@ -38,7 +38,7 @@ struct IO_RequestTable
 // Init && Free 
 //==============
 
-void init_io_table(struct IO_RequestTable* io_table)
+void init_io_table(struct IO_RequestTable* io_table, int export_fd)
 {
 	// Init the IO-ring first:
 	init_io_ring(&io_table->io_ring, MAX_IO_REQUESTS);
@@ -79,6 +79,9 @@ void init_io_table(struct IO_RequestTable* io_table)
 	register_io_buffers(&io_table->io_ring, iovecs, MAX_IO_REQUESTS);
 
 	free(iovecs);
+
+	// Register the export file for IO-ring:
+	register_files(&io_table->io_ring, &export_fd, 1);
 
 	// Create a cell-guarding semaphore:
 	if (sem_init(&io_table->sem, 0, MAX_IO_REQUESTS) == -1)

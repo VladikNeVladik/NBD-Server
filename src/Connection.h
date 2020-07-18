@@ -48,7 +48,7 @@ void conn_hangup_handler(int signal, siginfo_t* info, void* arg)
 {
 	if (signal == SIGIO && (info->si_code & POLL_ERR))
 	{
-		LOG("Lost connection to client");
+		LOG("Hard disconnect happened");
 		exit(EXIT_SUCCESS);
 	}
 }
