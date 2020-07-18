@@ -23,6 +23,12 @@
 // TCP keepalive options:
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+// Signals:
+#include <signal.h>
+
+//===========
+// Constants 
+//===========
 
 const uint16_t NBD_IANA_RESERVED_PORT = 10809;
 
@@ -33,6 +39,23 @@ const int TCP_KEEPALIVE_NUM_PROBES = 4;
 
 // TCP user-timeout:
 const unsigned int TCP_NO_SEND_ACKS_TIMEOUT = 5000; // ms
+
+//=============================
+// Connection Hangup Detection 
+//=============================
+
+void conn_hangup_handler(int signal, siginfo_t* info, void* arg)
+{
+	if (signal == SIGIO && (info->si_code & POLL_ERR))
+	{
+		LOG("Lost connection to client");
+		exit(EXIT_SUCCESS);
+	}
+}
+
+//==========================
+// Connection Establishment 
+//==========================
 
 int establish_connection()
 {
@@ -138,6 +161,51 @@ int establish_connection()
 	if (setsockopt(sock_fd, IPPROTO_TCP, TCP_LINGER2, &setsockopt_arg, sizeof(setsockopt_arg)) == -1)
 	{
 		LOG_ERROR("[establish_connection] Unable to disable TCP_LINGER2 socket option");
+		exit(EXIT_FAILURE);
+	}
+
+	//----------------------------
+	// Configure Hangup Detection 
+	//----------------------------
+
+	// Block all signals for signal handling:
+	sigset_t block_all_signals;
+	if (sigfillset(&block_all_signals) == -1)
+	{
+		LOG_ERROR("[establish_connection] Unable to fill signal mask");
+		exit(EXIT_FAILURE);
+	}
+
+	// Set SIGIO handler:
+	struct sigaction act = 
+	{
+		.sa_sigaction = conn_hangup_handler,
+		.sa_mask      = block_all_signals,
+		.sa_flags     = SA_SIGINFO|SA_RESTART
+	};
+	if (sigaction(SIGIO, &act, NULL) == -1)
+	{
+		LOG_ERROR("[establish_connection] Unable to set SIGIO handler");
+		exit(EXIT_FAILURE);
+	}
+
+	// Enable generation of signals on the socket:
+	if (fcntl(sock_fd, F_SETFL, O_ASYNC) == -1)
+	{
+		LOG_ERROR("[establish_connection] Unable to set O_ASYNC flag via fcntl()");
+		exit(EXIT_FAILURE);
+	}
+
+	if (fcntl(sock_fd, F_SETSIG, SIGIO) == -1)
+	{
+		LOG_ERROR("[establish_connection] Unable to enable additional info for SIGIO");
+		exit(EXIT_FAILURE);
+	}
+
+	// Set this process as owner of SIGIO:
+	if (fcntl(sock_fd, F_SETOWN, getpid()) == -1)
+	{
+		LOG_ERROR("[establish_connection] Unable to set change the owner of SIGIO");
 		exit(EXIT_FAILURE);
 	}
 

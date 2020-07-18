@@ -28,7 +28,6 @@ const uint32_t READ_BLOCK_SIZE = 4096;
 struct IO_RequestTable
 {
 	struct IO_Request* io_reqs;
-	uint32_t num_pending_io_reqs;
 
 	sem_t sem;
 
@@ -114,7 +113,7 @@ void free_io_table(struct IO_RequestTable* io_table)
 // Cell Management
 //=================
 
-uint32_t get_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell /*mother nbd cell*/)
+uint32_t get_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell)
 {
 	if (sem_wait(&io_table->sem) == -1)
 	{
@@ -137,6 +136,7 @@ uint32_t get_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell 
 	
 	BUG_ON(cell == -1, "[get_io_req_cell] Semaphore unlocked when shouldn't");
 
+	// Save corresponding nbd cell:
 	io_table->io_reqs[cell].mother_cell = mother_cell;
 
 	LOG("IO-request cell#%03u occupied", cell);
@@ -150,24 +150,24 @@ void free_io_req_cell(struct IO_RequestTable* io_table, uint32_t io_req_cell)
 
 	io_table->io_reqs[io_req_cell].empty = 1;
 
-	mark_top_io_as_processed(&io_table->io_ring);
-
 	// Free cell:
 	if (sem_post(&io_table->sem) == -1)
 	{
-		LOG_ERROR("[get_io_req_cell] Unable to down a semaphore");
+		LOG_ERROR("[get_io_req_cell] Unable to up a semaphore");
 		exit(EXIT_FAILURE);
 	}
 
 	LOG("IO-request cell#%03u free", io_req_cell);
 }
 
-//=========================
-// Submission & Completion
-//=========================
+//===============
+// IO Completion
+//===============
 
-uint32_t get_io_request(struct IO_Ring* io_ring, struct IO_Request* io_reqs)
+uint32_t get_io_request(struct IO_RequestTable* io_table)
 {
+	struct IO_Ring* io_ring = &io_table->io_ring;
+
 	uint32_t io_req_cell = wait_for_io_completion(io_ring);
 
 	BUG_ON(io_req_cell >= MAX_IO_REQUESTS, "[get_io_request] Invalid IO-cell");
@@ -175,7 +175,7 @@ uint32_t get_io_request(struct IO_Ring* io_ring, struct IO_Request* io_reqs)
 	if (io_ring->cq.cq_ring[*io_ring->cq.head & *io_ring->cq.ring_mask].res == -1)
 	{
 		LOG("An error occured during request on cell#%03u", io_req_cell);
-		io_reqs[io_req_cell].error = NBD_EINVAL;
+		io_table->io_reqs[io_req_cell].error = NBD_EINVAL;
 	}
 
 	LOG("IO-request on cell#%03u is complete", io_req_cell);

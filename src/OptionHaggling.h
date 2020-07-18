@@ -29,7 +29,8 @@ void recv_option_header(int sock_fd, struct NBD_Option* opt, bool fixed_newstyle
 {
 	struct OnWire_NBD_Option onwire_opt;
 
-	if (recv(sock_fd, &onwire_opt, sizeof(onwire_opt), MSG_WAITALL) != sizeof(onwire_opt))
+	int bytes_read = recv(sock_fd, &onwire_opt, sizeof(onwire_opt), MSG_WAITALL);
+	if (bytes_read != sizeof(onwire_opt))
 	{
 		LOG_ERROR("[recv_option_header] Unable to recv() option header");
 		exit(EXIT_FAILURE);
@@ -41,7 +42,6 @@ void recv_option_header(int sock_fd, struct NBD_Option* opt, bool fixed_newstyle
 		LOG("Hard disconnect");
 		exit(EXIT_SUCCESS);
 	}
-
 
 	opt->option = be32toh(onwire_opt.option);
 	opt->length = be32toh(onwire_opt.length);
@@ -60,7 +60,8 @@ void recv_option_data(int sock_fd, struct NBD_Option* opt)
 		int trash_bin = open(TRASH_BIN, 0);
 
 		// Discard data from socket:
-		if (splice(sock_fd, NULL, trash_bin, NULL, opt->length, SPLICE_F_MOVE) == -1)
+		int bytes_read = splice(sock_fd, NULL, trash_bin, NULL, opt->length, SPLICE_F_MOVE);
+		if (bytes_read == -1)
 		{
 			LOG_ERROR("[recv_option_data] Unable to splice() option data");
 			exit(EXIT_FAILURE);
@@ -70,7 +71,8 @@ void recv_option_data(int sock_fd, struct NBD_Option* opt)
 	}
 	else
 	{
-		if (recv(sock_fd, opt->buffer, opt->length, MSG_WAITALL) != opt->length)
+		int bytes_read = recv(sock_fd, opt->buffer, opt->length, MSG_WAITALL);
+		if (bytes_read != opt->length)
 		{
 			LOG_ERROR("[recv_option_data] Unable to recv() option data");
 			exit(EXIT_FAILURE);
@@ -110,7 +112,7 @@ void send_option_reply(int sock_fd, struct NBD_Option_Reply* rep)
 		.length       = htobe32(rep->length)
 	};
 
-	if (send(sock_fd, &rep_header, sizeof(rep_header), (rep->length ? MSG_MORE : 0)|MSG_NOSIGNAL) != sizeof(rep_header))
+	if (send(sock_fd, &rep_header, sizeof(rep_header), rep->length ? MSG_MORE : 0) != sizeof(rep_header))
 	{
 		LOG_ERROR("[send_option_reply] Unable to send() option reply header");
 		exit(EXIT_FAILURE);
@@ -118,7 +120,7 @@ void send_option_reply(int sock_fd, struct NBD_Option_Reply* rep)
 
 	if (rep->length != 0)
 	{
-		if (send(sock_fd, rep->buffer, rep->length, MSG_NOSIGNAL) != rep->length)
+		if (send(sock_fd, rep->buffer, rep->length, 0) != rep->length)
 		{
 			LOG_ERROR("[send_option_reply] Unable to send() option data");
 			exit(EXIT_FAILURE);
@@ -158,7 +160,7 @@ void send_option_export_name_reply(int sock_fd, uint64_t export_size, bool no_ze
 		.transmission_flags = htobe16(NBD_FLAG_HAS_FLAGS|NBD_FLAG_READ_ONLY)
 	};
 
-	if (send(sock_fd, &onwire_rep, sizeof(onwire_rep), MSG_MORE|MSG_NOSIGNAL) != sizeof(onwire_rep))
+	if (send(sock_fd, &onwire_rep, sizeof(onwire_rep), MSG_MORE) != sizeof(onwire_rep))
 	{
 		LOG_ERROR("[send_option_export_name_reply] Unable to send() option reply header");
 		exit(EXIT_FAILURE);
@@ -168,7 +170,7 @@ void send_option_export_name_reply(int sock_fd, uint64_t export_size, bool no_ze
 	{
 		char zeroes[124];
 		memset(zeroes, 0, 124);
-		if (send(sock_fd, zeroes, 124, MSG_NOSIGNAL) != 124)
+		if (send(sock_fd, zeroes, 124, 0) != 124)
 		{
 			LOG_ERROR("[send_option_export_name_reply] Unable to send() zero-zero-zero-zero-zero-... (00__00)");
 			exit(EXIT_FAILURE);
@@ -202,11 +204,17 @@ struct OnWire_NBD_Info_Block_Size_Reply
 	uint32_t maximum;
 } __attribute__((packed));
 
-void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size)
+void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size, uint32_t min_block_size)
 {
 	uint32_t export_name_length;
-	if (recv(sock_fd, &export_name_length, 4, MSG_WAITALL) != 4)
+	int bytes_read = recv(sock_fd, &export_name_length, 4, MSG_WAITALL);
+	if (bytes_read != 4)
 	{
+		// if (bytes_read == 0)
+		// {
+		// 	conn_hangup_handler();
+		// }
+
 		LOG_ERROR("[manage_option_go] Unable to recv() export name length");
 		exit(EXIT_FAILURE);
 	}
@@ -224,8 +232,14 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size)
 	recv_option_data(sock_fd, opt);
 
 	uint16_t num_info_requests;
-	if (recv(sock_fd, &num_info_requests, 2, MSG_WAITALL) != 2)
+	bytes_read = recv(sock_fd, &num_info_requests, 2, MSG_WAITALL);
+	if (bytes_read != 2)
 	{
+		// if (bytes_read == 0)
+		// {
+		// 	conn_hangup_handler();
+		// }
+
 		LOG_ERROR("[manage_option_go] Unable to recv() export name length");
 		exit(EXIT_FAILURE);
 	}
@@ -235,8 +249,14 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size)
 	for (uint16_t i = 0; i < num_info_requests; ++i)
 	{
 		struct OnWire_NBD_Info_Request onwire_info_request;
-		if (recv(sock_fd, &onwire_info_request, sizeof(onwire_info_request), MSG_WAITALL) != sizeof(onwire_info_request))
+		bytes_read = recv(sock_fd, &onwire_info_request, sizeof(onwire_info_request), MSG_WAITALL);
+		if (bytes_read != sizeof(onwire_info_request))
 		{
+			// if (bytes_read == 0)
+			// {
+			// 	conn_hangup_handler();
+			// }
+
 			LOG_ERROR("[manage_option_go] Unable to recv() export info request");
 			exit(EXIT_FAILURE);
 		}
@@ -246,7 +266,7 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size)
 		{
 			case NBD_INFO_EXPORT:
 			{
-				// Always sends.
+				// It is always sent anyway
 				break;
 			}
 			case NBD_INFO_BLOCK_SIZE:
@@ -254,7 +274,7 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size)
 				struct OnWire_NBD_Info_Block_Size_Reply onwire_info_reply = 
 				{
 					.type      = htobe16(NBD_INFO_BLOCK_SIZE),
-					.minimum   = htobe32(512),
+					.minimum   = htobe32(min_block_size),
 					.preferred = htobe32(4096),
 					.maximum   = htobe32(1024 * 1024)
 				};
@@ -307,7 +327,6 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size)
 
 	send_option_reply(sock_fd, &ack);
 
-	
 	LOG("Sent reply to NBD_OPT_GO (or NBD_OPT_INFO) option");
 }
 

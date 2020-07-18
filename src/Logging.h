@@ -36,7 +36,9 @@
 // 1 - Logging Enabled
 //----------------------
 
+#ifndef LOG_LEVEL
 #define LOG_LEVEL 1
+#endif
 
 //------------------------
 // Log File Manipulations 

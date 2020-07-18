@@ -22,7 +22,11 @@
 
 #include <stdlib.h>
 // open():
+#include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+// statfs():
+#include <sys/statfs.h>
 // close(), read():
 #include <unistd.h>
 // memset():
@@ -35,8 +39,6 @@
 #include <errno.h>
 // nanosleep():
 #include <time.h>
-// epoll:
-#include <sys/epoll.h>
 
 //=================
 // Data Structures
@@ -50,6 +52,7 @@ struct ServerHandle
 	const char* export_name;
 	int         export_fd;
 	uint64_t    export_size;
+	uint32_t    export_block_size;
 
 	// Established connection:
 	int client_sock_fd;
@@ -68,7 +71,6 @@ struct ServerHandle
 
 	struct NBD_RequestTable nbd_table;
 
-	size_t nbd_reqs_pending;
 	bool shutdown;
 };
 
@@ -84,13 +86,15 @@ struct ServerHandle
 
 void open_export_file(struct ServerHandle* handle)
 {
-	handle->export_fd = open(handle->export_name, O_RDONLY|O_DIRECT|O_NONBLOCK|O_LARGEFILE);
+	// Open export:
+	handle->export_fd = open(handle->export_name, O_RDONLY|O_LARGEFILE);
 	if (handle->export_fd == -1)
 	{
 		LOG_ERROR("[open_export_file] Unable to open() export file");
 		exit(EXIT_FAILURE);
 	}
 
+	// Get export size:
 	handle->export_size = lseek64(handle->export_fd, 0, SEEK_END);
 	if (handle->export_size == -1)
 	{
@@ -98,7 +102,18 @@ void open_export_file(struct ServerHandle* handle)
 		exit(EXIT_FAILURE);
 	}
 
-	LOG("Export file \"%s\" opened", handle->export_name);
+	// Get fs block size:
+	struct statfs fs_info;
+	if (fstatfs(handle->export_fd, &fs_info) == -1)
+	{
+		LOG_ERROR("[open_export_file] Unable to get fylesystem info");
+		exit(EXIT_FAILURE);
+	}
+
+	handle->export_block_size = fs_info.f_bsize;
+
+	LOG("Export file \"%s\" opened (size = %lub, block size = %u)",
+	    handle->export_name, handle->export_size, handle->export_block_size);
 }
 
 //=============
@@ -159,12 +174,12 @@ void manage_options(struct ServerHandle* handle)
 			}
 			case NBD_OPT_INFO:
 			{
-				manage_option_go(sock_fd, &opt, handle->export_size);
+				manage_option_go(sock_fd, &opt, handle->export_size, handle->export_block_size);
 				// Do not enter transmission phase on NBD_OPT_INFO
 			}
 			case NBD_OPT_GO:
 			{
-				manage_option_go(sock_fd, &opt, handle->export_size);
+				manage_option_go(sock_fd, &opt, handle->export_size, handle->export_block_size);
 				return;
 			}
 			case NBD_OPT_STRUCTURED_REPLY:
@@ -237,7 +252,7 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 	while (1)
 	{
 		recv_nbd_request(sock_fd, &req);
-
+		
 		send_nbd_simple_reply_header(sock_fd, &req, req.error != 0 && req.type == NBD_CMD_READ);
 
 		if (req.error != 0)
@@ -247,8 +262,13 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 		else if (req.type == NBD_CMD_READ)
 		{
 			// Send reply:
-			if (send(sock_fd, export + req.offset, req.length, MSG_NOSIGNAL) != req.length)
+			if (send(sock_fd, export + req.offset, req.length, 0) != req.length)
 			{
+				// if (errno == EPIPE || errno == ECONNRESET)
+				// {
+				// 	conn_hangup_handler();
+				// }
+
 				LOG_ERROR("[simple_transmission_eventloop] Unable to send() data to peer");
 				exit(EXIT_FAILURE);
 			}
@@ -281,7 +301,6 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 void init_structured_transmission(struct ServerHandle* handle)
 {
 	handle->shutdown = 0;
-	handle->nbd_reqs_pending = 0;
 
 	init_io_table (&handle-> io_table);
 	init_nbd_table(&handle->nbd_table);
@@ -306,7 +325,6 @@ void* structured_transmission_recv_eventloop(void* arg)
 	while (1)
 	{
 		uint32_t nbd_cell = get_nbd_req_cell(&handle->nbd_table);
-		handle->nbd_reqs_pending += 1;
 
 		struct NBD_Request* nbd_req = &handle->nbd_table.nbd_reqs[nbd_cell];
 
@@ -331,7 +349,7 @@ void structured_transmission_send_eventloop(struct ServerHandle* handle)
 	while (1)
 	{
 		// Block waiting for a completed IO request:
-		uint32_t io_cell = get_io_request(&handle->io_table.io_ring, handle->io_table.io_reqs);
+		uint32_t io_cell = get_io_request(&handle->io_table);
 
 		uint32_t nbd_cell = handle->io_table.io_reqs[io_cell].mother_cell;
 
@@ -348,17 +366,17 @@ void structured_transmission_send_eventloop(struct ServerHandle* handle)
 		}
 
 		free_io_req_cell(&handle->io_table, io_cell);
-		nbd_req->io_reqs_pending -= 1;
 
+		nbd_req->io_reqs_pending -= 1;
 		if (nbd_req->io_reqs_pending == 0)
 		{
 			send_nbd_final_read_reply(handle->client_sock_fd, nbd_req);
-			
+
 			free_nbd_req_cell(&handle->nbd_table, nbd_cell);
-			handle->nbd_reqs_pending -= 1;
 		}
 
-		if (handle->shutdown && handle->nbd_reqs_pending == 0)
+		// Perform shutdown:
+		if (handle->shutdown && no_infly_nbd_reqs(&handle->nbd_table))
 		{
 			LOG("Soft disconnect finished");
 			return;

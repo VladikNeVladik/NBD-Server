@@ -9,10 +9,6 @@
 #ifndef NBD_SERVER_IO_USERSPACE_RING_H_INCLUDED
 #define NBD_SERVER_IO_USERSPACE_RING_H_INCLUDED
 
-// IO-userspace-ring
-#include "vendor/io_uring.h"
-// Memory barriers:
-#include "vendor/barrier.h"
 // Everything:
 #include <stdlib.h>
 // sched_yield():
@@ -21,10 +17,17 @@
 #include <string.h>
 // close():
 #include <unistd.h>
-// syscall()
+// syscall():
 #include <sys/syscall.h>
-// mmap()
+// mmap():
 #include <sys/mman.h>
+// sigfillset():
+#include <signal.h>
+
+// IO-userspace-ring
+#include "vendor/io_uring.h"
+// Memory barriers:
+#include "vendor/barrier.h"
 
 #include "Logging.h"
 
@@ -99,7 +102,7 @@ void init_io_ring(struct IO_Ring* io_ring, uint32_t num_entries)
 	struct io_uring_params params;
 	memset(&params, 0, sizeof(params));
 
-	// Geta an IO-ring:
+	// Get an IO-ring:
 	int io_ring_fd = syscall(NR_io_uring_setup, num_entries, &params);
 	if (io_ring_fd == -1)
 	{
@@ -182,32 +185,57 @@ void free_io_ring(struct IO_Ring* io_ring)
 	LOG("IO-userspace-ring freed");
 }
 
+//==========================
+// Compiler Memory Barriers
+//==========================
+
+#define WRITE_ONCE(var, val) (*((volatile __typeof(var) *)(&(var))) = (val))
+#define READ_ONCE(var)       (*((volatile __typeof(var) *)(&(var))))
+
+//=====================
+// CPU Memory Barriers
+//=====================
+
+#if defined(__x86_64) || defined(__i386__)
+#define memory_barrier() __asm__ __volatile__("":::"memory")
+
+#else // In case of unknown arch perform a total memory barrier
+#define memory_barrier() __sync_synchronize()
+#endif
+
 //===============
 // IO Submission 
 //===============
 
-void submit_io_request(struct IO_Ring* io_ring, struct IO_Request* io_reqs, uint32_t io_req_cell)
+void submit_io_request(struct IO_Ring* io_ring, struct IO_Request* io_req, uint32_t io_req_cell)
 {
-	unsigned tail = *io_ring->sq.tail;
+	// Ensure the kernel updates to the SQ-ring have propagated to this CPU:
+	memory_barrier();
+	unsigned tail = READ_ONCE(*io_ring->sq.tail);
 
-	// Configure the IO submit operation:
-	io_ring->sq.sq_entries[io_req_cell].opcode    =           io_reqs[io_req_cell].opcode;
-	io_ring->sq.sq_entries[io_req_cell].flags     =           0;
-	io_ring->sq.sq_entries[io_req_cell].ioprio    =           2 /*IOPRIO_CLASS_BE*/;
-	io_ring->sq.sq_entries[io_req_cell].fd        =           io_reqs[io_req_cell].fd;
-	io_ring->sq.sq_entries[io_req_cell].off       =           io_reqs[io_req_cell].offset;
-	io_ring->sq.sq_entries[io_req_cell].addr      = (int64_t) io_reqs[io_req_cell].buffer;
-	io_ring->sq.sq_entries[io_req_cell].len       =           io_reqs[io_req_cell].length;
-	io_ring->sq.sq_entries[io_req_cell].user_data =           io_req_cell;
+	// Configure the SQ-entry for submission:
+	// Note: WRITE_ONCE forbids the compiler to optimize stores to be after the release:
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].opcode    ,           io_req->opcode);
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].flags     ,           0             );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].ioprio    ,           0 /*default*/ );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].fd        ,           io_req->fd    );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].off       ,           io_req->offset);
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].addr      , (int64_t) io_req->buffer);
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].len       ,           io_req->length);
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].rw_flags  ,           0             );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].user_data ,           io_req_cell   );
+	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].buf_index ,           io_req_cell   );
 
-	io_ring->sq.sq_ring[tail & *io_ring->sq.ring_mask] = io_req_cell;
+	WRITE_ONCE(io_ring->sq.sq_ring[tail & *io_ring->sq.ring_mask], io_req_cell);
 
-	tail += 1;
+	WRITE_ONCE(tail, tail + 1);
 
 	// Ensure the kernel sees the sq-entries update before the tail update:
-	io_uring_smp_store_release(io_ring->sq.tail, tail);
+	memory_barrier();
+	WRITE_ONCE(*io_ring->sq.tail, tail);
+	memory_barrier();
 
-	int ios_submitted = syscall(NR_io_uring_enter, io_ring->fd, 1, 0, NULL);
+	int ios_submitted = syscall(NR_io_uring_enter, io_ring->fd, 1, 0, NULL, _NSIG/8);
 	if (ios_submitted != 1)
 	{
 		LOG_ERROR("[submit_io_request] Unable to submit request to IO-ring submission queue");
@@ -215,7 +243,7 @@ void submit_io_request(struct IO_Ring* io_ring, struct IO_Request* io_reqs, uint
 	}
 
 	LOG("IO-request on cell#%03u submitted: {off=%lu, len=%u, mother=%u}",
-	    io_req_cell, io_reqs[io_req_cell].offset, io_reqs[io_req_cell].length, io_reqs[io_req_cell].mother_cell);
+	    io_req_cell, io_req->offset, io_req->length, io_req->mother_cell);
 }
 
 //===============
@@ -226,27 +254,35 @@ uint32_t wait_for_io_completion(struct IO_Ring* io_ring)
 {
 	if (*io_ring->cq.head == *io_ring->cq.tail)
 	{
-		if (syscall(NR_io_uring_enter, io_ring->fd, 0, 1, IORING_ENTER_GETEVENTS, NULL) == -1)
+		// Block connection hangup signal for correct IO waiting:
+		sigset_t block_all_signals;
+		if (sigfillset(&block_all_signals) == -1)
+		{
+			LOG_ERROR("[wait_for_io_completion] Unable to fill signal mask");
+			exit(EXIT_FAILURE);
+		}
+
+		// Wait for IO:
+		// Note: NSIG/8 is a size of sigset_t bitmask
+		if (syscall(NR_io_uring_enter, io_ring->fd, 0, 1, IORING_ENTER_GETEVENTS, &block_all_signals, _NSIG/8) == -1)
 		{
 			LOG_ERROR("[wait_for_io_completion] Unable to wait for IO completion");
 			exit(EXIT_FAILURE);
 		}
-
-		BUG_ON(*io_ring->cq.head == *io_ring->cq.tail, "[wait_for_io_completion] io_uring_enter() returned with no ready IO");
 	}
 
-	// Ensure that the cq-entry updates made by the kernel are visible:
-	uint32_t io_req_cell = io_uring_smp_load_acquire(&io_ring->cq.cq_ring[*io_ring->cq.head & *io_ring->cq.ring_mask].user_data);
+	// Ensure that the CQ-entries stores made by the kernel have propagated to this CPU:
+	memory_barrier();
+	unsigned head = READ_ONCE(*io_ring->cq.head);
 
+	// Read the IO-request result:
+	uint32_t io_req_cell = READ_ONCE(io_ring->cq.cq_ring[head & *io_ring->cq.ring_mask].user_data);
+
+	// Ensure the head moves after the io_req_cell is read
+	memory_barrier();
+	WRITE_ONCE(*io_ring->cq.head, head + 1);
+	
 	return io_req_cell;
-}
-
-void mark_top_io_as_processed(struct IO_Ring* io_ring)
-{
-	BUG_ON(*io_ring->cq.head >= *io_ring->cq.tail, "[mark_one_io_as_processed] No IO events were in processing");
-
-	// Ensure the cq-entriy is read before the head is moved: 
-	io_uring_smp_store_release(io_ring->cq.head, *io_ring->cq.head + 1);
 }
 
 #endif // NBD_SERVER_IO_USERSPACE_RING_H_INCLUDED

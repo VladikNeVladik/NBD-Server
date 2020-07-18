@@ -35,7 +35,6 @@ struct NBD_Request
 struct NBD_RequestTable
 {
 	struct NBD_Request* nbd_reqs;
-	uint32_t num_pending_nbd_reqs;
 
 	sem_t sem;
 };
@@ -56,7 +55,8 @@ void init_nbd_table(struct NBD_RequestTable* nbd_table)
 
 	for (uint32_t i = 0; i < MAX_NBD_REQUESTS; ++i)
 	{
-		nbd_table->nbd_reqs[i].empty = 1;
+		nbd_table->nbd_reqs[i].empty           = 1;
+		nbd_table->nbd_reqs[i].io_reqs_pending = 0;
 	}
 
 	// Create a cell-guarding semaphore:
@@ -127,6 +127,20 @@ void free_nbd_req_cell(struct NBD_RequestTable* nbd_table, uint32_t nbd_req_cell
 	LOG("NBD-request cell#%03u free", nbd_req_cell);
 }
 
+bool no_infly_nbd_reqs(struct NBD_RequestTable* nbd_table)
+{
+	int sem_value;
+	if (sem_getvalue(&nbd_table->sem, &sem_value) == -1)
+	{
+		LOG_ERROR("[free_nbd_req_cell] Unable to get a semaphore value");
+		exit(EXIT_FAILURE);
+	}
+
+	// Note:
+	// The actual value of the semaphore may be altered after the sem_getvalue() call
+	return sem_value == MAX_NBD_REQUESTS;
+}
+
 //============
 // Submission 
 //============
@@ -144,7 +158,7 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 		io_req->mother_cell = nbd_cell;
 		io_req->fd          = 0;
 		io_req->opcode      = IORING_OP_NOP;
-		io_req->offset      = 0;
+		io_req->offset      = -1;
 		io_req->length      = nbd_req->length;
 		io_req->error       = nbd_req->error;
 
@@ -162,7 +176,7 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 
 		uint64_t off = nbd_req->offset;
 		uint32_t len = nbd_req->length;
-		
+
 		while (1)
 		{
 			uint32_t io_cell = get_io_req_cell(io_table, nbd_cell);

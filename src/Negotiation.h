@@ -36,15 +36,26 @@ void perform_negotiation(int client_sock_fd, bool* no_zeroes, bool* fixed_newsty
 		.handshake_flags = htobe16(NBD_FLAG_FIXED_NEWSTYLE|NBD_FLAG_NO_ZEROES)
 	};
 
-	if (send(client_sock_fd, &server_says, sizeof(server_says), MSG_NOSIGNAL) != sizeof(server_says))
+	if (send(client_sock_fd, &server_says, sizeof(server_says), 0) != sizeof(server_says))
 	{
+		// if (errno == EPIPE || errno == ECONNRESET)
+		// {
+		// 	conn_hangup_handler();
+		// }
+
 		LOG_ERROR("[perform_negotiation] Unable to send() server negotiation");
 		exit(EXIT_FAILURE);
 	}
 
 	struct OnWire_Client_Negotiation client_says;
-	if (recv(client_sock_fd, &client_says, sizeof(client_says), MSG_WAITALL) != sizeof(client_says))
+	int bytes_read = recv(client_sock_fd, &client_says, sizeof(client_says), MSG_WAITALL);
+	if (bytes_read != sizeof(client_says))
 	{
+		// if (bytes_read == 0)
+		// {
+		// 	conn_hangup_handler();
+		// }
+
 		LOG_ERROR("[perform_negotiation] Unable to recv() client negotiation");
 		exit(EXIT_FAILURE);
 	}
@@ -58,7 +69,7 @@ void perform_negotiation(int client_sock_fd, bool* no_zeroes, bool* fixed_newsty
 	else
 	{
 		LOG("The client is a 000_zeromaniac_000!");
-		*no_zeroes = 1;
+		*no_zeroes = 0;
 	}
 
 	if (client_handshake_flags & NBD_FLAG_C_FIXED_NEWSTYLE)

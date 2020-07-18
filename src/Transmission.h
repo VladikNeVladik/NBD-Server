@@ -44,7 +44,8 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 	nbd_req->error = 0;
 
 	// Recv request:
-	if (recv(sock_fd, &onwire_req, sizeof(onwire_req), MSG_WAITALL) != sizeof(onwire_req))
+	int bytes_read = recv(sock_fd, &onwire_req, sizeof(onwire_req), MSG_WAITALL);
+	if (bytes_read != sizeof(onwire_req))
 	{
 		LOG_ERROR("[recv_nbd_request] Unable to recv() NBD request");
 		exit(EXIT_FAILURE);
@@ -85,7 +86,8 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 		const char* TRASH_BIN = "/dev/null";
 		int trash_bin = open(TRASH_BIN, 0);
 
-		if (splice(sock_fd, NULL, trash_bin, NULL, nbd_req->length, SPLICE_F_MOVE) == -1)
+		bytes_read = splice(sock_fd, NULL, trash_bin, NULL, nbd_req->length, SPLICE_F_MOVE);
+		if (bytes_read != nbd_req->length)
 		{
 			LOG_ERROR("[recv_nbd_request] Unable to splice() option data");
 			exit(EXIT_FAILURE);
@@ -101,6 +103,7 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 		nbd_req->length);
 }
 
+int fs_copy_fd = -1;
 void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Request* io_req)
 {
 	if (io_req->error == 0)
@@ -114,20 +117,20 @@ void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Req
 			.length      = htobe32(8 + io_req->length /*offset + data*/)
 		};
 
-		if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE|MSG_NOSIGNAL) != sizeof(onwire_reply))
+		if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE) != sizeof(onwire_reply))
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() reply header");
 			exit(EXIT_FAILURE);
 		}
 
 		uint64_t onwire_off = htobe64(io_req->offset);
-		if (send(sock_fd, &onwire_off, 8, MSG_MORE|MSG_NOSIGNAL) != 8)
+		if (send(sock_fd, &onwire_off, 8, MSG_MORE) != 8)
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() offset");
 			exit(EXIT_FAILURE);
 		}
 
-		if (send(sock_fd, io_req->buffer, io_req->length, MSG_NOSIGNAL) != io_req->length)
+		if (send(sock_fd, io_req->buffer, io_req->length, 0) != io_req->length)
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() data");
 			exit(EXIT_FAILURE);
@@ -144,35 +147,35 @@ void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Req
 			.length      = htobe32(4 + 2 + 8 /*error + strlen + offset*/)
 		};
 
-		if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE|MSG_NOSIGNAL) != sizeof(onwire_reply))
+		if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE) != sizeof(onwire_reply))
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() reply header");
 			exit(EXIT_FAILURE);
 		}
 
 		uint32_t error = htobe32(io_req->error);
-		if (send(sock_fd, &error, 4, MSG_MORE|MSG_NOSIGNAL) != 4)
+		if (send(sock_fd, &error, 4, MSG_MORE) != 4)
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() error");
 			exit(EXIT_FAILURE);
 		}
 
 		uint16_t length = htobe16(0);
-		if (send(sock_fd, &length, 2, MSG_MORE|MSG_NOSIGNAL) != 4)
+		if (send(sock_fd, &length, 2, MSG_MORE) != 4)
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() human-readable string length");
 			exit(EXIT_FAILURE);
 		}
 
 		uint64_t off = htobe64(io_req->offset);
-		if (send(sock_fd, &off, 8, MSG_NOSIGNAL) != 8)
+		if (send(sock_fd, &off, 8, 0) != 8)
 		{
 			LOG_ERROR("[send_nbd_read_reply] Unable to send() offset");
 			exit(EXIT_FAILURE);
 		}
 	}
 	
-	LOG("Sent NBD_CMD_READ structured reply: {hdl=%lu, off=%lu, len=%u}",
+	LOG("Sent NBD_CMD_READ structured reply to request {hdl=%lu, off=%lu, len=%u}",
 		nbd_req->handle,
 		 io_req->offset,
 		 io_req->length);
@@ -189,13 +192,13 @@ void send_nbd_final_read_reply(int sock_fd, struct NBD_Request* nbd_req)
 		.length      = htobe32(0)
 	};
 
-	if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE|MSG_NOSIGNAL) != sizeof(onwire_reply))
+	if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE) != sizeof(onwire_reply))
 	{
 		LOG_ERROR("[send_nbd_reply] Unable to send() final read reply");
 		exit(EXIT_FAILURE);
 	}
 
-	LOG("Sent NBD_CMD_READ final replyto NBd-request {hdl=%lu, off=%lu, len=%u}",
+	LOG("Sent NBD_CMD_READ final reply to request {hdl=%lu, off=%lu, len=%u}",
 		nbd_req->handle,
 		nbd_req->offset,
 		nbd_req->length);
