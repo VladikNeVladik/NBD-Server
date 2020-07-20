@@ -63,6 +63,11 @@ run_qemu_client:
 	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
 	@sudo mount -t ext4 /dev/nbd0 storage
 
+run_plain_mount:
+	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
+	@sudo mount -t ext4 serverside-fs storage
+
+
 test_connection_hangup : bin/execute-after
 	@printf "\033[1;33mRunning connection test with qemu-client\033[0m\n"
 	@sudo modprobe nbd
