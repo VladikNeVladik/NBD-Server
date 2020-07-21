@@ -38,11 +38,6 @@ void perform_negotiation(int client_sock_fd, bool* no_zeroes, bool* fixed_newsty
 
 	if (send(client_sock_fd, &server_says, sizeof(server_says), 0) != sizeof(server_says))
 	{
-		// if (errno == EPIPE || errno == ECONNRESET)
-		// {
-		// 	conn_hangup_handler();
-		// }
-
 		LOG_ERROR("[perform_negotiation] Unable to send() server negotiation");
 		exit(EXIT_FAILURE);
 	}
@@ -51,11 +46,6 @@ void perform_negotiation(int client_sock_fd, bool* no_zeroes, bool* fixed_newsty
 	int bytes_read = recv(client_sock_fd, &client_says, sizeof(client_says), MSG_WAITALL);
 	if (bytes_read != sizeof(client_says))
 	{
-		// if (bytes_read == 0)
-		// {
-		// 	conn_hangup_handler();
-		// }
-
 		LOG_ERROR("[perform_negotiation] Unable to recv() client negotiation");
 		exit(EXIT_FAILURE);
 	}

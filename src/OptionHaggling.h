@@ -196,7 +196,7 @@ struct OnWire_NBD_Info_Export_Reply
 	uint16_t transmission_flags;
 } __attribute__((packed));
 
-struct OnWire_NBD_Info_Block_Size_Reply
+struct OnWire_NBD_Info_BlockSize_Reply
 {
 	uint16_t type;
 	uint32_t minimum;
@@ -210,11 +210,6 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size,
 	int bytes_read = recv(sock_fd, &export_name_length, 4, MSG_WAITALL);
 	if (bytes_read != 4)
 	{
-		// if (bytes_read == 0)
-		// {
-		// 	conn_hangup_handler();
-		// }
-
 		LOG_ERROR("[manage_option_go] Unable to recv() export name length");
 		exit(EXIT_FAILURE);
 	}
@@ -235,11 +230,6 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size,
 	bytes_read = recv(sock_fd, &num_info_requests, 2, MSG_WAITALL);
 	if (bytes_read != 2)
 	{
-		// if (bytes_read == 0)
-		// {
-		// 	conn_hangup_handler();
-		// }
-
 		LOG_ERROR("[manage_option_go] Unable to recv() export name length");
 		exit(EXIT_FAILURE);
 	}
@@ -252,11 +242,6 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size,
 		bytes_read = recv(sock_fd, &onwire_info_request, sizeof(onwire_info_request), MSG_WAITALL);
 		if (bytes_read != sizeof(onwire_info_request))
 		{
-			// if (bytes_read == 0)
-			// {
-			// 	conn_hangup_handler();
-			// }
-
 			LOG_ERROR("[manage_option_go] Unable to recv() export info request");
 			exit(EXIT_FAILURE);
 		}
@@ -271,7 +256,7 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size,
 			}
 			case NBD_INFO_BLOCK_SIZE:
 			{
-				struct OnWire_NBD_Info_Block_Size_Reply onwire_info_reply = 
+				struct OnWire_NBD_Info_BlockSize_Reply onwire_info_reply = 
 				{
 					.type      = htobe16(NBD_INFO_BLOCK_SIZE),
 					.minimum   = htobe32(min_block_size),

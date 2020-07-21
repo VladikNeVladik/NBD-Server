@@ -44,7 +44,7 @@ compile : bin/nbd-server
 run_backup_server : bin/nbd-server
 	@printf "\033[1;33mRunning server!\033[0m\n"
 	@rm -rf serverside-fs
-	@dd if=/dev/zero of=serverside-fs bs=1024 count=36000
+	@dd if=/dev/zero of=serverside-fs bs=1024 count=131072
 	@mkfs.ext4 serverside-fs -d data-to-backup
 	@bin/nbd-server serverside-fs
 	@rm -rf serverside-fs
@@ -61,14 +61,14 @@ run_qemu_client:
 	@sudo modprobe nbd
 	@sudo qemu-nbd --read-only --connect=/dev/nbd0 nbd:localhost:10809 --aio=native
 	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
-	@time sudo mount -t ext4 /dev/nbd0 storage
+	@sudo mount -t ext4 /dev/nbd0 storage
 
 run_plain_mount:
 	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
-	@time sudo mount -t ext4 serverside-fs storage
+	@sudo mount -t ext4 serverside-fs storage
 
 
-test_connection_hangup : bin/execute-after
+test_connection_hangup : bin/kill-after bin/execute-after
 	@printf "\033[1;33mRunning connection test with qemu-client\033[0m\n"
 	@sudo modprobe nbd
 	@sudo bin/execute-after 50 ifconfig lo down
