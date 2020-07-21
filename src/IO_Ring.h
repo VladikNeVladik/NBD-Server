@@ -49,6 +49,7 @@ struct IO_Request
 {
 	bool empty;
 
+	uint32_t cell;
 	uint32_t mother_cell;
 
 	uint8_t  opcode;
@@ -159,6 +160,15 @@ void init_io_ring(struct IO_Ring* io_ring, uint32_t num_entries)
 	io_ring->cq.overflow     = cq_ring_ptr + params.cq_off.overflow;
 	io_ring->cq.cq_ring      = cq_ring_ptr + params.cq_off.cqes;
 
+	// Preconfigure SQ-entries:
+	for (unsigned i = 0; i < *io_ring->sq.ring_entries; ++i)
+	{
+		io_ring->sq.sq_entries[i].flags     = 0;
+		io_ring->sq.sq_entries[i].ioprio    = 0; // Default priority
+		io_ring->sq.sq_entries[i].rw_flags  = 0;
+		io_ring->sq.sq_entries[i].user_data = i;
+	}
+
 	LOG("IO-ring initialised");
 }
 
@@ -170,6 +180,13 @@ void register_files(struct IO_Ring* io_ring, int* fds, uint32_t num_fds)
 		exit(EXIT_FAILURE);
 	}
 
+	// Preconfigure SQ-entries:
+	for (unsigned i = 0; i < *io_ring->sq.ring_entries; ++i)
+	{
+		io_ring->sq.sq_entries[i].flags = IOSQE_FIXED_FILE;
+		io_ring->sq.sq_entries[i].fd    = 0; // The only registered file
+	}
+
 	LOG("Registered files for IO-ring");
 }
 
@@ -179,6 +196,13 @@ void register_io_buffers(struct IO_Ring* io_ring, struct iovec* buffers, uint32_
 	{
 		LOG_ERROR("[register_io_buffers] Unable to register IO buffers");
 		exit(EXIT_FAILURE);
+	}
+
+	// Preconfigure SQ-entries:
+	for (unsigned i = 0; i < *io_ring->sq.ring_entries; ++i)
+	{
+		io_ring->sq.sq_entries[i].addr      = (int64_t) buffers[i].iov_base;
+		io_ring->sq.sq_entries[i].buf_index = i;
 	}
 
 	LOG("Registered IO buffers for IO-ring");
@@ -196,7 +220,7 @@ void free_io_ring(struct IO_Ring* io_ring)
 }
 
 //================================
-// Compiler Reordering Prevention
+// Compiler Optimization Barriers
 //================================
 
 #define WRITE_ONCE(var, val) (*((volatile __typeof(var) *)(&(var))) = (val))
@@ -216,43 +240,50 @@ void free_io_ring(struct IO_Ring* io_ring)
 // IO Submission 
 //===============
 
-void submit_io_request(struct IO_Ring* io_ring, struct IO_Request* io_req, uint32_t io_req_cell)
+void submit_io_requests(struct IO_Ring* io_ring, struct IO_Request** io_reqs, unsigned num_io_reqs)
 {
 	// Ensure the kernel updates to the SQ-ring have propagated to this CPU:
 	memory_barrier();
 	unsigned tail = READ_ONCE(*io_ring->sq.tail);
 
-	// Configure the SQ-entry for submission:
-	// Note: WRITE_ONCE forbids the compiler to optimize stores away from barriered section
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].opcode    ,           io_req->opcode   );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].flags     ,           IOSQE_FIXED_FILE );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].ioprio    ,           0 /*default*/    );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].fd        ,           0 /*registered*/ );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].off       ,           io_req->offset   );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].addr      , (int64_t) io_req->buffer   );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].len       ,           io_req->length   );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].rw_flags  ,           0                );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].user_data ,           io_req_cell      );
-	WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].buf_index ,           io_req_cell      );
+	for (unsigned i = 0; i < num_io_reqs; ++i)
+	{
+		uint32_t io_req_cell = io_reqs[i]->cell;
 
-	WRITE_ONCE(io_ring->sq.sq_ring[tail & *io_ring->sq.ring_mask], io_req_cell);
+		// Configure the SQ-entry for submission:
+		// Note: WRITE_ONCE forbids the compiler to optimize stores away from barrier section
+		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].opcode, io_reqs[i]->opcode);
+		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].off   , io_reqs[i]->offset);
+		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].len   , io_reqs[i]->length);
 
-	WRITE_ONCE(tail, tail + 1);
+		WRITE_ONCE(io_ring->sq.sq_ring[tail & *io_ring->sq.ring_mask], io_req_cell);
+
+		tail += 1;
+
+		LOG("IO-request on cell#%03u submitted: {off=%lu, len=%u, mother=%u}",
+	    io_req_cell, io_reqs[i]->offset, io_reqs[i]->length, io_reqs[i]->mother_cell);
+	}
 
 	// Ensure the kernel sees the sq-entries update before the tail update:
 	memory_barrier();
 	WRITE_ONCE(*io_ring->sq.tail, tail);
+
+	// Ensure the tail update is propagated to the kernel CPU:
 	memory_barrier();
 
-	int ios_submitted = syscall(NR_io_uring_enter, io_ring->fd, 1, 0, NULL, _NSIG/8);
-	if (ios_submitted != 1)
+	sigset_t block_all_signals;
+	if (sigfillset(&block_all_signals) == -1)
 	{
-		LOG_ERROR("[submit_io_request] Unable to submit request to IO-ring submission queue");
+		LOG_ERROR("[structured_transmission_send_eventloop] Unable to fill signal mask");
 		exit(EXIT_FAILURE);
 	}
 
-	LOG("IO-request on cell#%03u submitted: {off=%lu, len=%u, mother=%u}",
-	    io_req_cell, io_req->offset, io_req->length, io_req->mother_cell);
+	int ios_submitted = syscall(NR_io_uring_enter, io_ring->fd, num_io_reqs, 0, 0, &block_all_signals, _NSIG/8);
+	if (ios_submitted != num_io_reqs)
+	{
+		LOG_ERROR("[submit_io_requests] Unable to submit request to IO-ring submission queue");
+		exit(EXIT_FAILURE);
+	}
 }
 
 //===============
@@ -263,17 +294,9 @@ uint32_t wait_for_io_completion(struct IO_Ring* io_ring)
 {
 	if (*io_ring->cq.head == *io_ring->cq.tail)
 	{
-		// Block connection hangup signal for correct IO waiting:
-		sigset_t block_all_signals;
-		if (sigfillset(&block_all_signals) == -1)
-		{
-			LOG_ERROR("[wait_for_io_completion] Unable to fill signal mask");
-			exit(EXIT_FAILURE);
-		}
-
 		// Wait for IO:
 		// Note: NSIG/8 is a size of sigset_t bitmask
-		if (syscall(NR_io_uring_enter, io_ring->fd, 0, 1, IORING_ENTER_GETEVENTS, &block_all_signals, _NSIG/8) == -1)
+		if (syscall(NR_io_uring_enter, io_ring->fd, 0, 1, IORING_ENTER_GETEVENTS, NULL, _NSIG/8) == -1)
 		{
 			LOG_ERROR("[wait_for_io_completion] Unable to wait for IO completion");
 			exit(EXIT_FAILURE);

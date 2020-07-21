@@ -1,5 +1,5 @@
 CC = gcc
-CCFLAGS += -std=c11 -Werror -Wall -pthread
+CCFLAGS += -std=c11 -Werror -Wall -O3 -pthread
 
 #================
 # ADMINISTRATION
@@ -61,11 +61,11 @@ run_qemu_client:
 	@sudo modprobe nbd
 	@sudo qemu-nbd --read-only --connect=/dev/nbd0 nbd:localhost:10809 --aio=native
 	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
-	@sudo mount -t ext4 /dev/nbd0 storage
+	@time sudo mount -t ext4 /dev/nbd0 storage
 
 run_plain_mount:
 	@printf "\033[1;33mMounting the backup fs!\033[0m\n"
-	@sudo mount -t ext4 serverside-fs storage
+	@time sudo mount -t ext4 serverside-fs storage
 
 
 test_connection_hangup : bin/execute-after

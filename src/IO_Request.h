@@ -11,6 +11,7 @@
 
 #include <semaphore.h>
 #include <malloc.h>
+#include <errno.h>
 
 //========================
 // Constants And Typedefs 
@@ -18,7 +19,7 @@
 
 typedef char bool;
 
-const size_t   MAX_IO_REQUESTS =   32;
+const size_t   MAX_IO_REQUESTS =   64;
 const uint32_t READ_BLOCK_SIZE = 4096;
 
 //=================
@@ -32,6 +33,8 @@ struct IO_RequestTable
 	sem_t sem;
 
 	struct IO_Ring io_ring;
+
+	uint32_t first_free;
 };
 
 //==============
@@ -69,8 +72,9 @@ void init_io_table(struct IO_RequestTable* io_table, int export_fd)
 
 	for (uint32_t i = 0; i < MAX_IO_REQUESTS; ++i)
 	{
-		io_table->io_reqs[i].buffer = &aligned_buffers[i * READ_BLOCK_SIZE];
 		io_table->io_reqs[i].empty  = 1;
+		io_table->io_reqs[i].cell   = i;
+		io_table->io_reqs[i].buffer = &aligned_buffers[i * READ_BLOCK_SIZE];
 
 		iovecs[i].iov_base = io_table->io_reqs[i].buffer;
 		iovecs[i].iov_len  = READ_BLOCK_SIZE;
@@ -89,6 +93,9 @@ void init_io_table(struct IO_RequestTable* io_table, int export_fd)
 		LOG_ERROR("[init_io_table] Unable to initialise semaphore");
 		exit(EXIT_FAILURE);
 	}
+
+	// Set the first free cell:
+	io_table->first_free = 0;
 
 	LOG("Initialised IO-request table");
 }
@@ -116,17 +123,10 @@ void free_io_table(struct IO_RequestTable* io_table)
 // Cell Management
 //=================
 
-uint32_t get_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell)
+static uint32_t search_io_req_cell(struct IO_RequestTable* io_table)
 {
-	if (sem_wait(&io_table->sem) == -1)
-	{
-		LOG_ERROR("[get_io_req_cell] Unable to down a semaphore");
-		exit(EXIT_FAILURE);
-	}
-
-	// Aquire a cell:
 	uint32_t cell = -1;
-	for (uint32_t i = 0; i < MAX_IO_REQUESTS; ++i)
+	for (uint32_t i = io_table->first_free; i < MAX_IO_REQUESTS; ++i)
 	{
 		if (io_table->io_reqs[i].empty)
 		{
@@ -136,8 +136,63 @@ uint32_t get_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell)
 			break;
 		}
 	}
+
+	if (cell == -1)
+	{
+		for (uint32_t i = 0; i < io_table->first_free; ++i)
+		{
+			if (io_table->io_reqs[i].empty)
+			{
+				io_table->io_reqs[i].empty = 0;
+
+				cell = i;
+				break;
+			}
+		}
+	}
 	
-	BUG_ON(cell == -1, "[get_io_req_cell] Semaphore unlocked when shouldn't");
+	BUG_ON(cell == -1, "[seacrh_for_io_cell] Semaphore unlocked when shouldn't");
+
+	io_table->first_free = cell + 1;
+
+	return cell;
+}
+
+uint32_t get_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell)
+{
+	if (sem_wait(&io_table->sem) == -1)
+	{
+		LOG_ERROR("[get_io_req_cell] Unable to down a semaphore");
+		exit(EXIT_FAILURE);
+	}
+
+	// Aquire a cell:
+	uint32_t cell = search_io_req_cell(io_table);
+	
+	// Save corresponding nbd cell:
+	io_table->io_reqs[cell].mother_cell = mother_cell;
+
+	LOG("IO-request cell#%03u occupied", cell);
+
+	return cell;
+}
+
+// The same as "get_io_req_cell", but instead of blocking it returns -1
+uint32_t tryget_io_req_cell(struct IO_RequestTable* io_table, uint32_t mother_cell)
+{
+	if (sem_trywait(&io_table->sem) == -1)
+	{
+		if (errno == EAGAIN)
+		{
+			return -1;
+		}
+
+		LOG_ERROR("[tryget_io_req_cell] Unable to down a semaphore");
+		exit(EXIT_FAILURE);	
+	}
+
+	// Aquire a cell:
+	uint32_t cell = search_io_req_cell(io_table);
 
 	// Save corresponding nbd cell:
 	io_table->io_reqs[cell].mother_cell = mother_cell;

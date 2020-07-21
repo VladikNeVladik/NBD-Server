@@ -39,6 +39,8 @@
 #include <errno.h>
 // nanosleep():
 #include <time.h>
+// pthread_sigmask():
+#include <signal.h>
 
 //=================
 // Data Structures
@@ -343,6 +345,20 @@ void* structured_transmission_recv_eventloop(void* arg)
 void structured_transmission_send_eventloop(struct ServerHandle* handle)
 {
 	LOG("Running send-eventloop for structured replies");
+
+	// Block connection hangup signal for correct IO waiting:
+	sigset_t block_all_signals;
+	if (sigfillset(&block_all_signals) == -1)
+	{
+		LOG_ERROR("[structured_transmission_send_eventloop] Unable to fill signal mask");
+		exit(EXIT_FAILURE);
+	}
+
+	if (pthread_sigmask(SIG_BLOCK, &block_all_signals, NULL) == -1)
+	{
+		LOG_ERROR("[structured_transmission_send_eventloop] Unable to block signals");
+		exit(EXIT_FAILURE);
+	}
 
 	while (1)
 	{

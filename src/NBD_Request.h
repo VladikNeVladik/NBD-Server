@@ -150,7 +150,10 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 
 	if (nbd_req->error || nbd_req->type == NBD_CMD_DISC)
 	{
-		// In case of NBD_CMD_DISC it makes sure that the recv-thread wakes up:
+		// In case of NBD_CMD_DISC wake up the recv-thread
+		
+		nbd_req->io_reqs_pending = 1;
+		
 		uint32_t io_cell = get_io_req_cell(io_table, nbd_cell);
 		struct IO_Request* io_req = &io_table->io_reqs[io_cell];
 
@@ -160,9 +163,7 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 		io_req->length      = nbd_req->length;
 		io_req->error       = nbd_req->error;
 
-		nbd_req->io_reqs_pending = 1;
-
-		submit_io_request(&io_table->io_ring, io_req, io_cell);
+		submit_io_requests(&io_table->io_ring, &io_req, 1);
 	}
 	else if (nbd_req->type == NBD_CMD_READ)
 	{
@@ -172,26 +173,53 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 			nbd_req->io_reqs_pending += 1;
 		}
 
+		// Read slicing:
 		uint64_t off = nbd_req->offset;
 		uint32_t len = nbd_req->length;
 
+		// Requests to submit:
+		struct IO_Request* reqs_to_submit[MAX_IO_REQUESTS];
+		unsigned num_io_reqs = 0;
+
 		while (1)
 		{
-			uint32_t io_cell = get_io_req_cell(io_table, nbd_cell);
-			struct IO_Request* io_req = &io_table->io_reqs[io_cell];
+			// Try to acquire cell without blocking: 
+			uint32_t io_cell = tryget_io_req_cell(io_table, nbd_cell);
+			if (io_cell == -1)
+			{
+				if (num_io_reqs != 0)
+				{
+					submit_io_requests(&io_table->io_ring, reqs_to_submit, num_io_reqs);
+					num_io_reqs = 0;
+				}
 
+				// Block if acquiring a cell is otherwise impossible:
+				io_cell = get_io_req_cell(io_table, nbd_cell);
+			}
+
+			// Configure the request:
+			struct IO_Request* io_req = &io_table->io_reqs[io_cell];
 			io_req->mother_cell = nbd_cell;
 			io_req->opcode      = IORING_OP_READ_FIXED;
 			io_req->offset      = off;
 			io_req->length      = (len <= READ_BLOCK_SIZE)? len : READ_BLOCK_SIZE;
 			io_req->error       = nbd_req->error;
 
-			submit_io_request(&io_table->io_ring, io_req, io_cell);
+			// Save IO request for submission:
+			reqs_to_submit[num_io_reqs] = io_req;
+			num_io_reqs += 1;
 
+			// Prepare another slice or quit:
 			if (len <= READ_BLOCK_SIZE) break;
 
 			off += READ_BLOCK_SIZE;
 			len -= READ_BLOCK_SIZE;
+		}
+
+		// Submit all the unsubmitted requests:
+		if (num_io_reqs != 0)
+		{
+			submit_io_requests(&io_table->io_ring, reqs_to_submit, num_io_reqs);
 		}
 	}
 	else
