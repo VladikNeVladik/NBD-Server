@@ -183,8 +183,7 @@ void register_files(struct IO_Ring* io_ring, int* fds, uint32_t num_fds)
 	// Preconfigure SQ-entries:
 	for (unsigned i = 0; i < *io_ring->sq.ring_entries; ++i)
 	{
-		io_ring->sq.sq_entries[i].flags = IOSQE_FIXED_FILE;
-		io_ring->sq.sq_entries[i].fd    = 0; // The only registered file
+		io_ring->sq.sq_entries[i].fd = 0; // The only registered file
 	}
 
 	LOG("Registered files for IO-ring");
@@ -240,12 +239,14 @@ void free_io_ring(struct IO_Ring* io_ring)
 // IO Submission 
 //===============
 
-void submit_io_requests(struct IO_Ring* io_ring, struct IO_Request** io_reqs, unsigned num_io_reqs)
+void submit_io_requests(struct IO_Ring* io_ring, struct IO_Request** io_reqs,
+                        unsigned num_io_reqs, bool enforce_ordering)
 {
 	// Ensure the kernel updates to the SQ-ring have propagated to this CPU:
 	memory_barrier();
 	unsigned tail = READ_ONCE(*io_ring->sq.tail);
 
+	// Wait for the IO-ring to idle before submitting the requests:
 	for (unsigned i = 0; i < num_io_reqs; ++i)
 	{
 		uint32_t io_req_cell = io_reqs[i]->cell;
@@ -255,6 +256,8 @@ void submit_io_requests(struct IO_Ring* io_ring, struct IO_Request** io_reqs, un
 		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].opcode, io_reqs[i]->opcode);
 		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].off   , io_reqs[i]->offset);
 		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].len   , io_reqs[i]->length);
+		WRITE_ONCE(io_ring->sq.sq_entries[io_req_cell].flags ,
+		           IOSQE_FIXED_FILE | ((enforce_ordering && i == 0)? IOSQE_IO_DRAIN : 0));
 
 		WRITE_ONCE(io_ring->sq.sq_ring[tail & *io_ring->sq.ring_mask], io_req_cell);
 

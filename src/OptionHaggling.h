@@ -7,6 +7,13 @@
 #ifndef NBD_SERVER_OPTION_HAGGLING_H_INCLUDED
 #define NBD_SERVER_OPTION_HAGGLING_H_INCLUDED
 
+//===========
+// Constants  
+//===========
+
+// Maximum request data length:
+const size_t RECV_BUFFER_SIZE = 32 * 4096;
+
 //================
 // Recieve Option 
 //================
@@ -259,9 +266,9 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size,
 				struct OnWire_NBD_Info_BlockSize_Reply onwire_info_reply = 
 				{
 					.type      = htobe16(NBD_INFO_BLOCK_SIZE),
-					.minimum   = htobe32(min_block_size),
-					.preferred = htobe32(4096),
-					.maximum   = htobe32(1024 * 1024)
+					.minimum   = htobe32(  min_block_size), // Filesystem block size
+					.preferred = htobe32(            4096), // Page size
+					.maximum   = htobe32(RECV_BUFFER_SIZE)  // Recieve-buffer size
 				};
 
 				struct NBD_Option_Reply rep = 
@@ -288,7 +295,7 @@ void manage_option_go(int sock_fd, struct NBD_Option* opt, uint64_t export_size,
 	{
 		.type               = htobe16(NBD_INFO_EXPORT),
 		.export_size        = htobe64(export_size),
-		.transmission_flags = htobe16(NBD_FLAG_HAS_FLAGS|NBD_FLAG_READ_ONLY)
+		.transmission_flags = htobe16(NBD_FLAG_HAS_FLAGS)
 	};
 
 	struct NBD_Option_Reply rep = 

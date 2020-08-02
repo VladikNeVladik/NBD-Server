@@ -10,6 +10,8 @@
 #include "IO_Request.h"
 
 #include <semaphore.h>
+// memcpy():
+#include <string.h>
 
 //=================
 // Data Structures
@@ -144,7 +146,35 @@ bool no_infly_nbd_reqs(struct NBD_RequestTable* nbd_table)
 // Submission 
 //============
 
-void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTable* nbd_table, uint32_t nbd_cell)
+static bool need_nbd_req_ordering(struct NBD_RequestTable* nbd_table, uint32_t nbd_cell)
+{
+	struct NBD_Request* nbd_req = &nbd_table->nbd_reqs[nbd_cell];
+
+	for (unsigned i = 0; i < MAX_NBD_REQUESTS; ++i)
+	{	
+		if (nbd_table->nbd_reqs[i].empty)                                                   continue;
+		if (nbd_table->nbd_reqs[i].type != NBD_CMD_WRITE && nbd_req->type != NBD_CMD_WRITE) continue;
+		if (i == nbd_cell)                                                                  continue;
+
+		// Semi-intevals do not overlap if (r1 <= l2) || (r2 <= l1):
+		// [[=====))  [[========))
+		// l1     r1  l2        r2
+
+		uint64_t l1 =      nbd_req->offset;
+		uint64_t r1 = l1 + nbd_req->length;
+		uint64_t l2 =      nbd_table->nbd_reqs[i].offset;
+		uint64_t r2 = l2 + nbd_table->nbd_reqs[i].length;
+		
+		if (!(r1 <= l2 || r2 <= l1))
+		{
+			return 1;
+		}
+	}
+
+	return 0;
+}
+
+void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTable* nbd_table, uint32_t nbd_cell, char* recv_buffer)
 {
 	struct NBD_Request* nbd_req = &nbd_table->nbd_reqs[nbd_cell];
 
@@ -159,21 +189,23 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 
 		io_req->mother_cell = nbd_cell;
 		io_req->opcode      = IORING_OP_NOP;
-		io_req->offset      = -1;
+		io_req->offset      = nbd_req->offset;
 		io_req->length      = nbd_req->length;
 		io_req->error       = nbd_req->error;
 
-		submit_io_requests(&io_table->io_ring, &io_req, 1);
+		submit_io_requests(&io_table->io_ring, &io_req, 1, 0);
 	}
-	else if (nbd_req->type == NBD_CMD_READ)
+	else if (nbd_req->type == NBD_CMD_READ ||
+	         nbd_req->type == NBD_CMD_WRITE)
 	{
+		// Calculate number of IOs:
 		nbd_req->io_reqs_pending = nbd_req->length / READ_BLOCK_SIZE;
 		if (nbd_req->length % READ_BLOCK_SIZE != 0)
 		{
 			nbd_req->io_reqs_pending += 1;
 		}
 
-		// Read slicing:
+		// Slicing parameters:
 		uint64_t off = nbd_req->offset;
 		uint32_t len = nbd_req->length;
 
@@ -181,30 +213,59 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 		struct IO_Request* reqs_to_submit[MAX_IO_REQUESTS];
 		unsigned num_io_reqs = 0;
 
+		// Determine if ordering is necessary:
+		bool need_to_enforce_ordering = need_nbd_req_ordering(nbd_table, nbd_cell);
+
+		// Insert a IOSQE_IO_DRAIN-ed IORING_OP_NOP, working as a memory barrier:
+		if (need_to_enforce_ordering)
+		{
+			uint32_t io_cell = get_io_req_cell(io_table, nbd_cell);
+
+			struct IO_Request* io_req = &io_table->io_reqs[io_cell];
+			io_req->mother_cell = nbd_cell;
+			io_req->opcode      = IORING_OP_NOP;
+
+			// Save IO request for submission:
+			reqs_to_submit[num_io_reqs] = io_req;
+			num_io_reqs += 1;
+			nbd_req->io_reqs_pending += 1;
+		}
+
+		// Submit IOs:
 		while (1)
 		{
-			// Try to acquire cell without blocking: 
+			// Try to acquire cell without blocking:
 			uint32_t io_cell = tryget_io_req_cell(io_table, nbd_cell);
 			if (io_cell == -1)
 			{
 				if (num_io_reqs != 0)
 				{
-					submit_io_requests(&io_table->io_ring, reqs_to_submit, num_io_reqs);
+					submit_io_requests(&io_table->io_ring, reqs_to_submit, num_io_reqs, need_to_enforce_ordering);
 					num_io_reqs = 0;
+					need_to_enforce_ordering = 0;
 				}
 
 				// Block if acquiring a cell is otherwise impossible:
 				io_cell = get_io_req_cell(io_table, nbd_cell);
 			}
 
-			// Configure the request:
+			// Configure the read-write request:
 			struct IO_Request* io_req = &io_table->io_reqs[io_cell];
 			io_req->mother_cell = nbd_cell;
-			io_req->opcode      = IORING_OP_READ_FIXED;
 			io_req->offset      = off;
 			io_req->length      = (len <= READ_BLOCK_SIZE)? len : READ_BLOCK_SIZE;
 			io_req->error       = nbd_req->error;
 
+			if (nbd_req->type == NBD_CMD_READ)
+			{
+				io_req->opcode = IORING_OP_READ_FIXED;
+			}
+			else
+			{
+				io_req->opcode = IORING_OP_WRITE_FIXED;
+				memcpy(io_req->buffer, &recv_buffer[io_req->offset - nbd_req->offset], io_req->length);
+			}
+			
 			// Save IO request for submission:
 			reqs_to_submit[num_io_reqs] = io_req;
 			num_io_reqs += 1;
@@ -219,7 +280,7 @@ void submit_nbd_request(struct IO_RequestTable* io_table, struct NBD_RequestTabl
 		// Submit all the unsubmitted requests:
 		if (num_io_reqs != 0)
 		{
-			submit_io_requests(&io_table->io_ring, reqs_to_submit, num_io_reqs);
+			submit_io_requests(&io_table->io_ring, reqs_to_submit, num_io_reqs, need_to_enforce_ordering);
 		}
 	}
 	else

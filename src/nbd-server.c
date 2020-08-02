@@ -2,8 +2,7 @@
 //===================================================================
 // NBD Server
 //===================================================================
-// - Implementation of Network Block Device protocol baseline
-// - Actually, even less than the baseline (^_^) - no NBD_CMD_WRITE
+// Implementation of Network Block Device protocol baseline
 //===================================================================
 
 #ifndef _LARGEFILE64_SOURCE
@@ -43,7 +42,7 @@
 #include <signal.h>
 
 //=================
-// Data Structures
+// Data Structures 
 //=================
 
 typedef char bool;
@@ -89,7 +88,7 @@ struct ServerHandle
 void open_export_file(struct ServerHandle* handle)
 {
 	// Open export:
-	handle->export_fd = open(handle->export_name, O_RDONLY|O_LARGEFILE);
+	handle->export_fd = open(handle->export_name, O_RDWR|O_LARGEFILE);
 	if (handle->export_fd == -1)
 	{
 		LOG_ERROR("[open_export_file] Unable to open() export file");
@@ -256,7 +255,7 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 
 	while (1)
 	{
-		recv_nbd_request(sock_fd, &req);
+		recv_nbd_request(sock_fd, NULL, &req);
 		
 		send_nbd_simple_reply_header(sock_fd, &req, req.error != 0 && req.type == NBD_CMD_READ);
 
@@ -274,6 +273,21 @@ void simple_transmission_eventloop(struct ServerHandle* handle)
 			}
 
 			LOG("Reply to request sent");
+		}
+		else if (req.type == NBD_CMD_WRITE)
+		{
+			unsigned bytes_read = 0;
+			while (bytes_read != req.length)
+			{
+				int cur_read = recv(sock_fd, export + req.offset + bytes_read, req.length - bytes_read, MSG_WAITALL);
+				if (cur_read == -1)
+				{
+					LOG_ERROR("[simple_transmission_eventloop] Unable to recv() request data");
+					exit(EXIT_FAILURE);
+				}
+
+				bytes_read += cur_read;
+			}
 		}
 		else if (req.type == NBD_CMD_DISC)
 		{
@@ -322,15 +336,23 @@ void* structured_transmission_recv_eventloop(void* arg)
 
 	struct ServerHandle* handle = arg;
 
+	// Init recv-buffer:
+	char* recv_buffer = (char*) malloc(RECV_BUFFER_SIZE);
+	if (recv_buffer == NULL)
+	{
+		LOG_ERROR("[structured_transmission_recv_eventloop] Unable to allocate memory for recv-buffer");
+		exit(EXIT_FAILURE);
+	}
+
 	while (1)
 	{
 		uint32_t nbd_cell = get_nbd_req_cell(&handle->nbd_table);
 
 		struct NBD_Request* nbd_req = &handle->nbd_table.nbd_reqs[nbd_cell];
 
-		recv_nbd_request(handle->client_sock_fd, nbd_req);
+		recv_nbd_request(handle->client_sock_fd, recv_buffer, nbd_req);
 
-		submit_nbd_request(&handle->io_table, &handle->nbd_table, nbd_cell);
+		submit_nbd_request(&handle->io_table, &handle->nbd_table, nbd_cell, recv_buffer);
 		
 		if (nbd_req->type == NBD_CMD_DISC)
 		{
@@ -338,6 +360,8 @@ void* structured_transmission_recv_eventloop(void* arg)
 			break;
 		}
 	}
+
+	free(recv_buffer);
 
 	return NULL;
 }
@@ -370,7 +394,8 @@ void structured_transmission_send_eventloop(struct ServerHandle* handle)
 		struct  IO_Request*  io_req = &handle-> io_table. io_reqs[ io_cell];
 		struct NBD_Request* nbd_req = &handle->nbd_table.nbd_reqs[nbd_cell];
 
-		if (nbd_req->type == NBD_CMD_DISC)
+		// Handle IO-request completion:
+		if (io_req->opcode == IORING_OP_NOP)
 		{
 			// Do nothing
 		}
@@ -378,13 +403,18 @@ void structured_transmission_send_eventloop(struct ServerHandle* handle)
 		{
 			send_nbd_read_reply(handle->client_sock_fd, nbd_req, io_req);
 		}
+		else if (nbd_req->type == NBD_CMD_WRITE)
+		{
+			send_nbd_write_reply(handle->client_sock_fd, nbd_req, io_req);
+		}
 
 		free_io_req_cell(&handle->io_table, io_cell);
 
+		// Handle NBD-request completion:
 		nbd_req->io_reqs_pending -= 1;
 		if (nbd_req->io_reqs_pending == 0)
 		{
-			send_nbd_final_read_reply(handle->client_sock_fd, nbd_req);
+			send_nbd_final_reply(handle->client_sock_fd, nbd_req);
 
 			free_nbd_req_cell(&handle->nbd_table, nbd_cell);
 		}

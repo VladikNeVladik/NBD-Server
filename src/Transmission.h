@@ -18,6 +18,10 @@
 // htobe64() and the boys:
 #include <endian.h>
 
+//=================
+// Data Structures
+//=================
+
 struct OnWire_NBD_Request
 {
 	uint32_t request_magic;
@@ -37,7 +41,7 @@ struct OnWire_NBD_Reply
 	uint32_t length;
 } __attribute__((packed));
 
-void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
+void recv_nbd_request(int sock_fd, char* recv_buffer, struct NBD_Request* nbd_req)
 {
 	struct OnWire_NBD_Request onwire_req;
 
@@ -50,12 +54,6 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 		LOG_ERROR("[recv_nbd_request] Unable to recv() NBD request");
 		exit(EXIT_FAILURE);
 	}
-
-	// Fix endianness:
-	nbd_req->type   = be16toh(onwire_req.type);
-	nbd_req->handle = be64toh(onwire_req.handle);
-	nbd_req->offset = be64toh(onwire_req.offset);
-	nbd_req->length = be32toh(onwire_req.length);
 
 	// Error-check:
 	if (be32toh(onwire_req.request_magic) != NBD_MAGIC_REQUEST)
@@ -71,14 +69,47 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 		nbd_req->error = NBD_EINVAL;
 	}
 
-	if (nbd_req->type != NBD_CMD_READ && nbd_req->type != NBD_CMD_DISC)
+	// Fix endianness:
+	nbd_req->type   = be16toh(onwire_req.type  );
+	nbd_req->handle = be64toh(onwire_req.handle);
+	nbd_req->offset = be64toh(onwire_req.offset);
+	nbd_req->length = be32toh(onwire_req.length);
+
+	if (nbd_req->type != NBD_CMD_READ  &&
+		nbd_req->type != NBD_CMD_WRITE &&
+		nbd_req->type != NBD_CMD_DISC)
 	{
 		LOG("Client sent unsoppurted request type");
 		nbd_req->error = NBD_EINVAL;
 	}
 
+	// Read data into recv-buffer:
+	if (nbd_req->type == NBD_CMD_WRITE)
+	{
+		if (nbd_req->length > RECV_BUFFER_SIZE)
+		{
+			LOG("Assuming NBD_CMD_WRITE with length of %u is a DOS-attack. Hard disconnect", nbd_req->length);
+			exit(EXIT_FAILURE);
+		}
+
+		if (recv_buffer != NULL && nbd_req->length != 0)
+		{
+			unsigned bytes_read = 0;
+			while (bytes_read != nbd_req->length)
+			{
+				int cur_read = recv(sock_fd, &recv_buffer[bytes_read], nbd_req->length - bytes_read, MSG_WAITALL);
+				if (cur_read == -1)
+				{
+					LOG_ERROR("[recv_nbd_request] Unable to recv() request data");
+					exit(EXIT_FAILURE);
+				}
+
+				bytes_read += cur_read;
+			}
+		}
+	}
 	// Discard spare data:
-	if (nbd_req->type != NBD_CMD_READ && nbd_req->length != 0)
+	else if (nbd_req->type != NBD_CMD_READ && nbd_req->length != 0)
 	{
 		LOG("Client sent non-zero request data length");
 		nbd_req->error = NBD_EINVAL;
@@ -89,7 +120,7 @@ void recv_nbd_request(int sock_fd, struct NBD_Request* nbd_req)
 		bytes_read = splice(sock_fd, NULL, trash_bin, NULL, nbd_req->length, SPLICE_F_MOVE);
 		if (bytes_read != nbd_req->length)
 		{
-			LOG_ERROR("[recv_nbd_request] Unable to splice() option data");
+			LOG_ERROR("[recv_nbd_request] Unable to splice() request data");
 			exit(EXIT_FAILURE);
 		}
 
@@ -175,13 +206,13 @@ void send_nbd_read_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Req
 		}
 	}
 	
-	LOG("Sent NBD_CMD_READ structured reply to request {hdl=%lu, off=%lu, len=%u}",
+	LOG("Sent NBD_CMD_READ structured reply {hdl=%lu, off=%lu, len=%u}",
 		nbd_req->handle,
 		 io_req->offset,
 		 io_req->length);
 }
 
-void send_nbd_final_read_reply(int sock_fd, struct NBD_Request* nbd_req)
+void send_nbd_final_reply(int sock_fd, struct NBD_Request* nbd_req)
 {
 	struct OnWire_NBD_Reply onwire_reply =
 	{
@@ -194,14 +225,55 @@ void send_nbd_final_read_reply(int sock_fd, struct NBD_Request* nbd_req)
 
 	if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE) != sizeof(onwire_reply))
 	{
-		LOG_ERROR("[send_nbd_reply] Unable to send() final read reply");
+		LOG_ERROR("[send_nbd_final_reply] Unable to send() final read reply");
 		exit(EXIT_FAILURE);
 	}
 
-	LOG("Sent NBD_CMD_READ final reply to request {hdl=%lu, off=%lu, len=%u}",
+	LOG("Sent final reply to request {hdl=%lu, off=%lu, len=%u}",
 		nbd_req->handle,
 		nbd_req->offset,
 		nbd_req->length);
+}
+
+void send_nbd_write_reply(int sock_fd, struct NBD_Request* nbd_req, struct IO_Request* io_req)
+{
+	if (io_req->error == 0) return;
+
+	struct OnWire_NBD_Reply onwire_reply =
+	{
+		.reply_magic = htobe32(NBD_MAGIC_STRUCTURED_REPLY),
+		.flags       = htobe16(0),
+		.type        = htobe16(NBD_REPLY_TYPE_ERROR_OFFSET),
+		.handle      = htobe64(nbd_req->handle),
+		.length      = htobe32(4 + 2 + 8 /*error + strlen + offset*/)
+	};
+
+	if (send(sock_fd, &onwire_reply, sizeof(onwire_reply), MSG_MORE) != sizeof(onwire_reply))
+	{
+		LOG_ERROR("[send_nbd_write_reply] Unable to send() reply header");
+		exit(EXIT_FAILURE);
+	}
+
+	uint32_t error = htobe32(io_req->error);
+	if (send(sock_fd, &error, 4, MSG_MORE) != 4)
+	{
+		LOG_ERROR("[send_nbd_write_reply] Unable to send() error");
+		exit(EXIT_FAILURE);
+	}
+
+	uint16_t length = htobe16(0);
+	if (send(sock_fd, &length, 2, MSG_MORE) != 4)
+	{
+		LOG_ERROR("[send_nbd_write_reply] Unable to send() human-readable string length");
+		exit(EXIT_FAILURE);
+	}
+
+	uint64_t off = htobe64(io_req->offset);
+	if (send(sock_fd, &off, 8, 0) != NBD_REPLY_FLAG_DONE)
+	{
+		LOG_ERROR("[send_nbd_write_reply] Unable to send() offset");
+		exit(EXIT_FAILURE);
+	}
 }
 
 #endif // NBD_SERVER_TRANSMISSION_H_INCLUDED

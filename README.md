@@ -1,52 +1,59 @@
 # NBD-Server
 
 ## Тест на работоспособность
-Первичный запуск бэкап-сервера:
+Создание файловой системы для раздачи:
 ```
-make install
-cp /path/to/valuable-file.txt data-to-backup/valuable-file.txt
-make run_backup_server
+make 
+cp path/to/file.txt data-to-backup/file.txt
+make create-serverside-fs
 ```
-Запуск бэкап-клиента (в другой консоли):
+Запуск nbd-сервера:
 ```
-make run_qemu_client
-cat storage/valuable-file.txt
+make run-backup-server
+```
+Запуск nbd-клиента (в другой консоли):
+```
+make run-qemu-client
+```
+Монтирование раздаваемой сервером файловой системы у клиента:
+```
+make mount-clientside-fs
 ```
 Окончание сессии:
 ```
-make stop_backup
+make umount-clientside-fs
+make stop-backup
 ```
 ## Тест на обрыв соединения
-Запуск бэкап-сервера:
+Запуск nbd-сервера:
 ```
-make run_backup_server
+make run-backup-server
 ```
 В другой консоли:
 ```
-make test_connection_hangup
+make test-connection-hangup
 ```
-Этот тест запускает бэкап-клиента, после чего временно отключает loopback-интерфейс, которым поддерживалось соединение с бэкап-сервером. Бэкап-сервер посредством механизма TCP-keepalive обнаруживает разрыв соединения (характерное время обнаружения - 5 секунд). По обнаружении утери соединения сервер логирует "Hard disconnect happened".
+Этот тест запускает nbd-клиента, после чего временно отключает loopback-интерфейс, которым поддерживалось соединение с nbd-сервером. nbd-сервер посредством механизма TCP-keepalive обнаруживает разрыв соединения (характерное время обнаружения - 5 секунд). По обнаружении утери соединения сервер логирует "Hard disconnect happened".
 
 ## Оценка производительности
-### Монтирование файловой системы
+### Без передачи данных по NBD
 ```
-make run_backup_server
-```
-В другой консоли:
-```
-time make run_plain_mount
-umount storage
+make mount-serverside-fs
+time cp serverside-mount/performance-test-file /dev/null
 ```
 Тест оценивает затраты времени на доступ к диску без учёта издержек протокола NBD.
 
 ### Простые ответы
 ```
-make run_backup_server
+make run-backup-server
 ```
 В другой консоли:
 ```
-time make run_linux_client
-make stop_backup
+make run-linux-client
+make mount-clientside-fs
+time cp clientside-mount/performance-test-file /dev/null
+make umount-clientside-fs
+make stop-backup
 ```
 Тест оценивает надбавку времени на передачу данных по сети (без учёта нижних уровней OSI). Доступ к диску производится в блокирующем (последовательном) режиме.
 
@@ -56,8 +63,11 @@ make run_backup_server
 ```
 В другой консоли:
 ```
-time make run_qemu_client
-make stop_backup
+make run-qemu-client
+make mount-clientside-fs
+time cp clientside-mount/performance-test-file /dev/null
+make umount-clientside-fs
+make stop-backup
 ```
 Этот тест, в отличие от предыдущего, производит доступ к диску в асинхронном режиме, что позволяет оценить степень параллельности доступа к диску.
 

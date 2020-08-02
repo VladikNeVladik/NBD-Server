@@ -164,6 +164,14 @@ int establish_connection()
 		exit(EXIT_FAILURE);
 	}
 
+	// Disable Nagle's algorithm:
+	setsockopt_arg = 1;
+	if (setsockopt(sock_fd, IPPROTO_TCP, TCP_NODELAY, &setsockopt_arg, sizeof(setsockopt_arg)) == -1)
+	{
+		LOG_ERROR("[establish_connection] Unable to enable TCP_NODELAY socket option");
+		exit(EXIT_FAILURE);
+	}
+
 	//----------------------------
 	// Configure Hangup Detection 
 	//----------------------------
